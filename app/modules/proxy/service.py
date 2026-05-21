@@ -128,6 +128,18 @@ from app.modules.api_keys.service import (
     ApiKeysService,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy.affinity import (
+    _AffinityPolicy,
+    _extract_model_class,
+    _is_synthesized_turn_state,
+    _owner_lookup_session_id_from_headers,
+    _prompt_cache_key_from_request_model,
+    _resolve_prompt_cache_key,
+    _sticky_key_for_codex_control_request,
+    _sticky_key_for_responses_request,
+    _sticky_key_from_session_header,
+    _sticky_key_from_turn_state_header,
+)
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
@@ -186,6 +198,7 @@ from app.modules.proxy.types import (
 )
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
@@ -263,6 +276,18 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
+# Maximum time (seconds) to wait for a prewarm upstream response before
+# giving up and letting the actual request proceed without prewarming.
+# A blocked prewarm holds the response_create_gate semaphore and prevents
+# the real request from being sent, leading to an indefinite :keepalive hang.
+_PREWARM_RESPONSE_TIMEOUT_SECONDS = 2.0
+# Maximum consecutive keepalive frames sent before terminating the stream.
+# 6 × 10s (default interval) = 60s.  Combined with the 0.5s startup-probe
+# window this ensures the client sees a terminal event within ≈70s when the
+# upstream silently stops responding.
+_STREAM_KEEPALIVE_MAX_COUNT = 6
+
+
 async def _await_cancelled_task(
     task: asyncio.Task[_TaskResultT],
     *,
@@ -325,14 +350,6 @@ _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
-
-
-@dataclass(frozen=True, slots=True)
-class _AffinityPolicy:
-    key: str | None = None
-    kind: StickySessionKind | None = None
-    reallocate_sticky: bool = False
-    max_age_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1496,6 +1513,7 @@ class ProxyService:
             assert event_queue is not None
             yielded_any = False
             keepalive_sent = False
+            keepalive_count = 0
             while True:
                 keepalive_interval = getattr(get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
@@ -1505,6 +1523,24 @@ class ProxyService:
                     try:
                         event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
+                        keepalive_count += 1
+                        if keepalive_count > _STREAM_KEEPALIVE_MAX_COUNT:
+                            logger.info(
+                                "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s",
+                                request_state.request_id,
+                                keepalive_count,
+                            )
+                            yield format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    response_failed_event(
+                                        "stream_idle_timeout",
+                                        "Upstream did not respond within the keepalive window",
+                                        response_id=request_state.response_id or request_state.request_id,
+                                    ),
+                                )
+                            )
+                            break
                         keepalive_sent = True
                         yielded_any = True
                         if request_state.response_id:
@@ -1527,6 +1563,7 @@ class ProxyService:
                     event_block = await event_queue.get()
                 if event_block is None:
                     break
+                keepalive_count = 0
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
                 if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
@@ -6350,7 +6387,38 @@ class ProxyService:
                 request_enqueued = True
                 await session.upstream.send_text(warmup_text)
                 while True:
-                    event_block = await event_queue.get()
+                    try:
+                        event_block = await asyncio.wait_for(
+                            event_queue.get(),
+                            timeout=_PREWARM_RESPONSE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "HTTP bridge prewarm timed out request_id=%s model=%s",
+                            request_state.request_id,
+                            request_state.model,
+                        )
+                        session.prewarmed = False
+                        try:
+                            # The warmup request has already been sent upstream.  Close/reconnect the
+                            # socket while the warmup state is still attached so any late warmup
+                            # response cannot be assigned to the next visible request on this session.
+                            await self._reconnect_http_bridge_session(
+                                session,
+                                request_state=request_state,
+                                restart_reader=True,
+                            )
+                        except Exception:
+                            session.closed = True
+                            raise
+                        finally:
+                            async with session.pending_lock:
+                                if warmup_state in session.pending_requests:
+                                    session.pending_requests.remove(warmup_state)
+                            self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
+                            if gate_acquired:
+                                _release_websocket_response_create_gate(warmup_state, session.response_create_gate)
+                        return
                     if event_block is None:
                         break
                     payload = parse_sse_data_json(event_block)
@@ -6421,10 +6489,15 @@ class ProxyService:
                 session.upstream_control.retire_after_drain = True
                 detached = True
         request_state.event_queue = None
+        # event_queue is nulled unconditionally because by the time
+        # _detach is called from the finally block in
+        # _stream_http_bridge_session_events, the terminal event has
+        # already been delivered via _pop_terminal_websocket_request_state.
+        # A late-arriving event on a nulled queue is a no-op.
+        _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             return False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        _release_websocket_response_create_gate(request_state, session.response_create_gate)
         await self._release_websocket_request_state_reservation(request_state)
         request_state.api_key_reservation = None
         await self._retire_http_bridge_after_drain_if_ready(session)
@@ -8242,6 +8315,7 @@ class ProxyService:
                 settlement.error_code or "upstream_error",
             )
             upstream_control.reconnect_requested = True
+            upstream_control.retire_after_drain = True
         elif settlement.record_success:
             await self._load_balancer.record_success(account)
             self._remember_websocket_previous_response_owner(
@@ -10386,17 +10460,7 @@ class ProxyService:
         if not account_map:
             return []
         latest = await repos.usage.latest_by_account(window=window)
-        return [
-            UsageWindowRow(
-                account_id=entry.account_id,
-                used_percent=entry.used_percent,
-                reset_at=entry.reset_at,
-                window_minutes=entry.window_minutes,
-                recorded_at=entry.recorded_at,
-            )
-            for entry in latest.values()
-            if entry.account_id in account_map
-        ]
+        return [usage_history_to_window_row(entry) for entry in latest.values() if entry.account_id in account_map]
 
     async def _latest_usage_entries(
         self,
@@ -13181,145 +13245,6 @@ def _interesting_header_keys(headers: Mapping[str, str]) -> list[str]:
     return sorted({key.lower() for key in headers.keys() if key.lower() in allowlist})
 
 
-def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
-    typed_value = getattr(payload, "prompt_cache_key", None)
-    if isinstance(typed_value, str) and typed_value:
-        return typed_value
-    if not payload.model_extra:
-        return None
-    extra_value = payload.model_extra.get("prompt_cache_key")
-    if isinstance(extra_value, str) and extra_value:
-        return extra_value
-    camel_value = payload.model_extra.get("promptCacheKey")
-    if isinstance(camel_value, str) and camel_value:
-        return camel_value
-    return None
-
-
-def _extract_model_class(model: str) -> str:
-    """Extract model class from model name for cache key prefix.
-
-    Classification:
-    - "mini" for gpt-5.4-mini
-    - "codex" for gpt-5.3-codex* (any variant)
-    - "std" for all others
-    """
-    if "codex" in model:
-        return "codex"
-    if "mini" in model:
-        return "mini"
-    return "std"
-
-
-def _derive_prompt_cache_key(
-    payload: ResponsesRequest | ResponsesCompactRequest,
-    api_key: ApiKeyData | None,
-) -> str:
-    """Derive a stable, session-scoped prompt_cache_key when the client does not provide one.
-
-    The generated key is scoped to (model-class, api-key, instructions-prefix, first-user-input) so that:
-    - Different model classes get *different* keys (prevents cache pollution).
-    - Parallel sessions from the same API key get *different* keys (different first input).
-    - Successive turns within one session get the *same* key (first input stays constant).
-    - Different API keys never collide.
-    """
-    parts: list[str] = []
-    model = getattr(payload, "model", None)
-    model_class = _extract_model_class(model) if isinstance(model, str) and model else None
-
-    if api_key is not None:
-        parts.append(api_key.id[:12])
-
-    instructions = getattr(payload, "instructions", None)
-    if isinstance(instructions, str) and instructions:
-        parts.append(sha256(instructions[:512].encode()).hexdigest()[:12])
-
-    first_user_text = _extract_first_user_input(payload)
-    if first_user_text:
-        parts.append(sha256(first_user_text[:512].encode()).hexdigest()[:12])
-
-    if not parts:
-        random_suffix = uuid4().hex[:24]
-        return f"{model_class}-{random_suffix}" if model_class is not None else random_suffix
-
-    return "-".join([model_class, *parts]) if model_class is not None else "-".join(parts)
-
-
-def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
-    """Return a text representation of the first user input item for cache key derivation."""
-    input_value = getattr(payload, "input", None)
-    if isinstance(input_value, str):
-        return input_value[:512]
-    if not isinstance(input_value, list):
-        return None
-    for item in input_value:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        if role == "user":
-            content = item.get("content")
-            if isinstance(content, str):
-                return content[:512]
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict):
-                        text = part.get("text")
-                        if isinstance(text, str):
-                            return text[:512]
-            return json.dumps(item, sort_keys=True, ensure_ascii=False)[:512]
-    return None
-
-
-def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
-    value = _prompt_cache_key_from_request_model(payload)
-    if not value:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
-    normalized = {key.lower(): value for key, value in headers.items()}
-    for key in ("session_id", "x-codex-session-id", "x-codex-conversation-id"):
-        value = normalized.get(key)
-        if not isinstance(value, str):
-            continue
-        stripped = value.strip()
-        if stripped:
-            return stripped
-    return None
-
-
-def _sticky_key_from_turn_state_header(headers: Mapping[str, str]) -> str | None:
-    normalized = {key.lower(): value for key, value in headers.items()}
-    value = normalized.get("x-codex-turn-state")
-    if not isinstance(value, str):
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _sticky_key_for_codex_control_request(
-    headers: Mapping[str, str],
-    *,
-    codex_session_affinity: bool,
-) -> _AffinityPolicy:
-    turn_state_key = _sticky_key_from_turn_state_header(headers)
-    if turn_state_key:
-        return _AffinityPolicy(
-            key=turn_state_key,
-            kind=StickySessionKind.CODEX_SESSION,
-        )
-    if codex_session_affinity:
-        session_key = _sticky_key_from_session_header(headers)
-        if session_key:
-            return _AffinityPolicy(
-                key=session_key,
-                kind=StickySessionKind.CODEX_SESSION,
-            )
-    return _AffinityPolicy()
-
-
 def _is_missing_thread_goal_protocol_error(exc: ProxyResponseError) -> bool:
     if exc.status_code not in {404, 405}:
         return False
@@ -13337,53 +13262,6 @@ def _is_missing_thread_goal_protocol_error(exc: ProxyResponseError) -> bool:
 def _detached_account_copy(account: Account) -> Account:
     data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
     return Account(**data)
-
-
-def _owner_lookup_session_id_from_headers(headers: Mapping[str, str]) -> str | None:
-    # `x-codex-turn-state` is per conversation turn/thread and is more specific
-    # than `session_id`, which may be shared across multiple terminals.
-    turn_state = _sticky_key_from_turn_state_header(headers)
-    if turn_state is not None:
-        return turn_state
-    return _sticky_key_from_session_header(headers)
-
-
-# Pattern matching turn-state values synthesized by the helpers below.
-# A 32-char lowercase hex (uuid4().hex) suffix follows the prefix.
-_SYNTHESIZED_TURN_STATE_PATTERN = re.compile(r"^(?:http_)?turn_[0-9a-f]{32}$")
-
-
-def _is_synthesized_turn_state(value: str) -> bool:
-    """True when ``value`` matches a turn-state synthesized by codex-lb itself.
-
-    Used by the file-pin resolver to distinguish a client-supplied
-    continuation marker from a synthesizer-generated placeholder so
-    first-turn upload-then-converse requests still benefit from
-    file_id pin routing on the websocket / HTTP entry points.
-    """
-    return bool(_SYNTHESIZED_TURN_STATE_PATTERN.match(value))
-
-
-def ensure_downstream_turn_state(headers: Mapping[str, str]) -> str:
-    existing = _sticky_key_from_turn_state_header(headers)
-    if existing is not None:
-        return existing
-    return f"turn_{uuid4().hex}"
-
-
-def ensure_http_downstream_turn_state(headers: Mapping[str, str]) -> str:
-    existing = _sticky_key_from_turn_state_header(headers)
-    if existing is not None:
-        return existing
-    return f"http_turn_{uuid4().hex}"
-
-
-def build_downstream_turn_state_accept_headers(turn_state: str) -> list[tuple[bytes, bytes]]:
-    return [(b"x-codex-turn-state", turn_state.encode("utf-8"))]
-
-
-def build_downstream_turn_state_response_headers(turn_state: str) -> dict[str, str]:
-    return {"x-codex-turn-state": turn_state}
 
 
 def _upstream_turn_state_from_socket(upstream: UpstreamResponsesWebSocket | None) -> str | None:
@@ -13478,72 +13356,6 @@ def _http_bridge_session_matches_preferred_account(
     if previous_response_id is None or preferred_account_id is None:
         return True
     return session.account.id == preferred_account_id
-
-
-def _resolve_prompt_cache_key(
-    payload: ResponsesRequest | ResponsesCompactRequest,
-    *,
-    openai_cache_affinity: bool,
-    api_key: ApiKeyData | None,
-) -> tuple[str | None, str]:
-    cache_key = _prompt_cache_key_from_request_model(payload)
-    if isinstance(cache_key, str):
-        stripped = cache_key.strip()
-        if stripped:
-            if stripped != cache_key:
-                payload.prompt_cache_key = stripped
-            return stripped, "payload"
-    if not openai_cache_affinity:
-        return None, "none"
-    settings = get_settings()
-    if not settings.openai_prompt_cache_key_derivation_enabled:
-        return None, "none"
-    cache_key = _derive_prompt_cache_key(payload, api_key)
-    payload.prompt_cache_key = cache_key
-    return cache_key, "derived"
-
-
-def _sticky_key_for_responses_request(
-    payload: ResponsesRequest,
-    headers: Mapping[str, str],
-    *,
-    codex_session_affinity: bool,
-    openai_cache_affinity: bool,
-    openai_cache_affinity_max_age_seconds: int,
-    sticky_threads_enabled: bool,
-    api_key: ApiKeyData | None = None,
-) -> _AffinityPolicy:
-    cache_key, _ = _resolve_prompt_cache_key(
-        payload,
-        openai_cache_affinity=openai_cache_affinity,
-        api_key=api_key,
-    )
-    turn_state_key = _sticky_key_from_turn_state_header(headers)
-    if turn_state_key:
-        return _AffinityPolicy(
-            key=turn_state_key,
-            kind=StickySessionKind.CODEX_SESSION,
-        )
-    if codex_session_affinity:
-        session_key = _sticky_key_from_session_header(headers)
-        if session_key:
-            return _AffinityPolicy(
-                key=session_key,
-                kind=StickySessionKind.CODEX_SESSION,
-            )
-    if openai_cache_affinity:
-        return _AffinityPolicy(
-            key=cache_key,
-            kind=StickySessionKind.PROMPT_CACHE,
-            max_age_seconds=openai_cache_affinity_max_age_seconds,
-        )
-    if sticky_threads_enabled:
-        return _AffinityPolicy(
-            key=cache_key,
-            kind=StickySessionKind.STICKY_THREAD,
-            reallocate_sticky=True,
-        )
-    return _AffinityPolicy()
 
 
 def _make_http_bridge_session_key(

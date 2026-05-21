@@ -70,10 +70,9 @@ from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRe
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
-from app.core.usage.types import UsageWindowRow
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.sse import format_sse_event, inject_sse_keepalives, parse_sse_data_json
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -88,6 +87,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -118,6 +118,7 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
@@ -428,8 +429,8 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
-    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
     forwarded_headers.setdefault("x-codex-turn-state", turn_state)
     await context.service.proxy_responses_websocket(
@@ -561,8 +562,8 @@ async def v1_responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
-    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
     forwarded_headers.setdefault("x-codex-turn-state", turn_state)
     await context.service.proxy_responses_websocket(
@@ -705,8 +706,8 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     primary_latest = await usage_repository.latest_by_account(window="primary")
     secondary_latest = await usage_repository.latest_by_account(window="secondary")
 
-    primary_rows = [_usage_entry_to_window_row(entry) for entry in primary_latest.values()]
-    secondary_rows = [_usage_entry_to_window_row(entry) for entry in secondary_latest.values()]
+    primary_rows = [usage_history_to_window_row(entry) for entry in primary_latest.values()]
+    secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
 
     account_ids = {row.account_id for row in primary_rows} | {row.account_id for row in secondary_rows}
@@ -756,16 +757,6 @@ async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> 
         )
     )
     return list(result.scalars().all())
-
-
-def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
-    )
 
 
 @transcribe_router.post("/transcribe")
@@ -1838,12 +1829,12 @@ async def _stream_responses(
     downstream_turn_state = (
         forwarded_downstream_turn_state
         if bridge_active and forwarded_downstream_turn_state is not None
-        else proxy_service_module.ensure_http_downstream_turn_state(effective_headers)
+        else proxy_affinity_module.ensure_http_downstream_turn_state(effective_headers)
         if bridge_active
         else None
     )
     turn_state_headers = (
-        proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
+        proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)
         if downstream_turn_state is not None
         else {}
     )
@@ -1934,10 +1925,10 @@ async def _collect_responses(
     rate_limit_headers = await context.service.rate_limit_headers()
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     downstream_turn_state = (
-        proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
+        proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
     turn_state_headers = (
-        proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
+        proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)
         if downstream_turn_state is not None
         else {}
     )
