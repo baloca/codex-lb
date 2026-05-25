@@ -27,8 +27,10 @@ export function AccountsPage() {
     importMutation,
     pauseMutation,
     resumeMutation,
+    setAliasMutation,
     deleteMutation,
     exportMutation,
+    limitWarmupMutation,
   } = useAccounts();
   const oauth = useOauth();
 
@@ -70,15 +72,19 @@ export function AccountsPage() {
     importMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
+    setAliasMutation.isPending ||
     deleteMutation.isPending ||
-    exportMutation.isPending;
+    exportMutation.isPending ||
+    limitWarmupMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
+    getErrorMessageOrNull(setAliasMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
-    getErrorMessageOrNull(exportMutation.error);
+    getErrorMessageOrNull(exportMutation.error) ||
+    getErrorMessageOrNull(limitWarmupMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -112,9 +118,13 @@ export function AccountsPage() {
             busy={mutationBusy}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
+            onSetAlias={(accountId, alias) => setAliasMutation.mutateAsync({ accountId, alias })}
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
             onExport={(accountId) => void exportMutation.mutateAsync(accountId)}
+            onLimitWarmupChange={(accountId, enabled) =>
+              void limitWarmupMutation.mutateAsync({ accountId, enabled })
+            }
           />
         </div>
       )}
