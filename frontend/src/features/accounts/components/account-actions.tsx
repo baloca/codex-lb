@@ -10,7 +10,7 @@ export type AccountActionsProps = {
   onResume: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
-  onExport: (accountId: string) => void;
+  onExportAuth: (accountId: string) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
 };
 
@@ -21,7 +21,7 @@ export function AccountActions({
   onResume,
   onDelete,
   onReauth,
-  onExport,
+  onExportAuth,
   onLimitWarmupChange,
 }: AccountActionsProps) {
   return (
@@ -82,7 +82,7 @@ export function AccountActions({
         size="sm"
         variant="outline"
         className="h-8 gap-1.5 text-xs"
-        onClick={() => onExport(account.accountId)}
+        onClick={() => onExportAuth(account.accountId)}
         disabled={busy}
       >
         <Download className="h-3.5 w-3.5" />

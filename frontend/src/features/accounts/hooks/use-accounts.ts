@@ -3,7 +3,7 @@ import { toast } from "sonner";
 
 import {
   deleteAccount,
-  exportAccount,
+  exportAccountAuth,
   getAccountTrends,
   importAccount,
   listAccounts,
@@ -16,6 +16,7 @@ import {
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+  void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
 }
 
 /**
@@ -72,32 +73,14 @@ export function useAccountMutations() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: deleteAccount,
+    mutationFn: ({ accountId, deleteHistory }: { accountId: string; deleteHistory: boolean }) =>
+      deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
       toast.success("Account deleted");
       invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Delete failed");
-    },
-  });
-
-  const exportMutation = useMutation({
-    mutationFn: exportAccount,
-    onSuccess: (data) => {
-      const blob = new Blob([data.authJson], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "auth.json";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      toast.success("Account exported");
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || "Export failed");
     },
   });
 
@@ -113,13 +96,23 @@ export function useAccountMutations() {
     },
   });
 
+  const exportAuthMutation = useMutation({
+    mutationFn: exportAccountAuth,
+    onSuccess: () => {
+      toast.success("Account exported");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Export failed");
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
     resumeMutation,
     setAliasMutation,
     deleteMutation,
-    exportMutation,
+    exportAuthMutation,
     limitWarmupMutation,
   };
 }

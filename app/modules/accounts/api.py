@@ -4,23 +4,28 @@ from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.refresh import RefreshError
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
     AccountAliasResponse,
+    AccountAuthExportResponse,
     AccountDeleteResponse,
     AccountExportResponse,
     AccountImportResponse,
     AccountLimitWarmupUpdateRequest,
     AccountLimitWarmupUpdateResponse,
+    AccountOpenCodeAuthExportResponse,
     AccountPauseResponse,
+    AccountProbeRequest,
+    AccountProbeResponse,
     AccountReactivateResponse,
     AccountsResponse,
     AccountTrendsResponse,
 )
-from app.modules.accounts.service import InvalidAuthJsonError
+from app.modules.accounts.service import AccountNotProbableError, InvalidAuthJsonError
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -48,7 +53,7 @@ async def get_account_trends(
     return result
 
 
-@router.post("/{account_id}/export", response_model=AccountExportResponse)
+@router.post("/{account_id}/export", response_model=AccountExportResponse, deprecated=True)
 async def export_account(
     request: Request,
     response: Response,
@@ -65,6 +70,48 @@ async def export_account(
         "account_exported",
         actor_ip=request.client.host if request.client else None,
         details={"account_id": result.account_id},
+    )
+    return result
+
+
+@router.post("/{account_id}/export/auth", response_model=AccountAuthExportResponse)
+async def export_account_auth(
+    request: Request,
+    response: Response,
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountAuthExportResponse:
+    result = await context.service.export_auth(account_id)
+    if not result:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    AuditService.log_async(
+        "account_auth_exported",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id},
+    )
+    return result
+
+
+@router.post("/{account_id}/export/opencode-auth", response_model=AccountOpenCodeAuthExportResponse, deprecated=True)
+async def export_account_opencode_auth(
+    request: Request,
+    response: Response,
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountOpenCodeAuthExportResponse:
+    result = await context.service.export_opencode_auth(account_id)
+    if not result:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    AuditService.log_async(
+        "account_auth_exported",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id},
     )
     return result
 
@@ -99,6 +146,37 @@ async def reactivate_account(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountReactivateResponse(status="reactivated")
+
+
+@router.post("/{account_id}/probe", response_model=AccountProbeResponse)
+async def probe_account(
+    request: Request,
+    account_id: str,
+    body: AccountProbeRequest | None = None,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountProbeResponse:
+    requested_model = body.model if body is not None else None
+    try:
+        result = await context.service.probe_account(account_id, model=requested_model)
+    except AccountNotProbableError as exc:
+        raise DashboardConflictError(str(exc), code="account_not_probable") from exc
+    except RefreshError as exc:
+        raise DashboardConflictError(
+            f"Probe could not refresh account credentials: {exc.message}",
+            code="account_probe_refresh_failed",
+        ) from exc
+    if result is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_probed",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": result.account_id,
+            "probe_status_code": result.probe_status_code,
+            "model": requested_model,
+        },
+    )
+    return result
 
 
 @router.post("/{account_id}/pause", response_model=AccountPauseResponse)
@@ -146,14 +224,15 @@ async def update_account_limit_warmup(
 async def delete_account(
     request: Request,
     account_id: str,
+    delete_history: bool = False,
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountDeleteResponse:
-    success = await context.service.delete_account(account_id)
+    success = await context.service.delete_account(account_id, delete_history=delete_history)
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(
         "account_deleted",
         actor_ip=request.client.host if request.client else None,
-        details={"account_id": account_id},
+        details={"account_id": account_id, "delete_history": delete_history},
     )
     return AccountDeleteResponse(status="deleted")

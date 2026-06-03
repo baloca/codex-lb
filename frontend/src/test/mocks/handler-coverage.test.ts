@@ -22,8 +22,11 @@ function extractHandlerPaths(): string[] {
 const EXPECTED_ENDPOINTS = [
 	// health
 	"GET /health",
+	// runtime
+	"GET /api/runtime/version",
 	// dashboard
 	"GET /api/dashboard/overview",
+	"GET /api/dashboard/projections",
 	"GET /api/request-logs",
 	"GET /api/request-logs/options",
 	// accounts
@@ -35,6 +38,7 @@ const EXPECTED_ENDPOINTS = [
 	"PUT /api/accounts/:accountId/limit-warmup",
 	"GET /api/accounts/:accountId/trends",
 	"POST /api/accounts/:accountId/export",
+	"POST /api/accounts/:accountId/export/auth",
 	"DELETE /api/accounts/:accountId",
 	// oauth
 	"POST /api/oauth/start",

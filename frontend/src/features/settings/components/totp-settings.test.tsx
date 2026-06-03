@@ -31,8 +31,11 @@ const baseSettings = {
   upstreamStreamTransport: "default" as const,
   preferEarlierResetAccounts: false,
   routingStrategy: "usage_weighted" as const,
+  relativeAvailabilityPower: 2,
+  relativeAvailabilityTopK: 5,
   openaiCacheAffinityMaxAgeSeconds: 300,
   dashboardSessionTtlSeconds: 43200,
+  warmupModel: "gpt-5.4-mini",
   importWithoutOverwrite: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,
@@ -114,16 +117,7 @@ describe("TotpSettings", () => {
 
     await user.click(screen.getByRole("switch"));
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: false,
-      routingStrategy: "usage_weighted",
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      importWithoutOverwrite: false,
       totpRequiredOnLogin: true,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

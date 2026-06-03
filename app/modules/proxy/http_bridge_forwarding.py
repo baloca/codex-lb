@@ -95,13 +95,16 @@ class HTTPBridgeOwnerClient:
                     raise ProxyResponseError(
                         response.status,
                         _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
+                        failure_phase="owner_forward_status",
+                        failure_detail="owner_forward_non_200",
+                        upstream_status_code=response.status,
                     )
                 yielded_event = False
                 try:
                     async for event_block in _iter_sse_event_blocks(
                         response,
                         request_started_at=request_started_at,
-                        proxy_request_budget_seconds=settings.proxy_request_budget_seconds,
+                        proxy_request_budget_seconds=settings.http_responses_session_bridge_request_budget_seconds,
                         stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
                     ):
                         yielded_event = True

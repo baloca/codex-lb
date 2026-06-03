@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
-from app.core.auth import DEFAULT_PLAN, extract_id_token_claims
+from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
@@ -35,6 +35,7 @@ def build_account_summaries(
     encryptor: TokenEncryptor,
     include_auth: bool = True,
 ) -> list[AccountSummary]:
+    duplicate_keys = _duplicate_detection_keys_appearing_more_than_once(accounts)
     return [
         _account_to_summary(
             account,
@@ -45,9 +46,40 @@ def build_account_summaries(
             limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
             encryptor,
             include_auth=include_auth,
+            is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
         )
         for account in accounts
     ]
+
+
+def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) -> set[tuple[str, str, str | None]]:
+    """Return duplicate (email, ChatGPT account id, workspace id) keys in this list.
+
+    Emails are compared case-sensitively to match the storage normalization
+    already performed at OAuth-import time. Blank/None emails, the legacy
+    DEFAULT_EMAIL placeholder used by malformed imports, and rows without a
+    ChatGPT account identity are excluded so valid same-email accounts in
+    different workspaces are not flagged as stale/fresh duplicates.
+    """
+    counts: dict[tuple[str, str, str | None], int] = {}
+    for account in accounts:
+        key = _duplicate_detection_key(account)
+        if key is None:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    return {key for key, count in counts.items() if count > 1}
+
+
+def _duplicate_detection_key(account: Account) -> tuple[str, str, str | None] | None:
+    email = account.email
+    chatgpt_account_id = account.chatgpt_account_id
+    if not _is_duplicate_detection_email(email) or not chatgpt_account_id:
+        return None
+    return email, chatgpt_account_id, account.workspace_id
+
+
+def _is_duplicate_detection_email(email: str | None) -> bool:
+    return bool(email and email.strip()) and email != DEFAULT_EMAIL
 
 
 def _account_to_summary(
@@ -59,6 +91,7 @@ def _account_to_summary(
     limit_warmup: AccountLimitWarmup | None,
     encryptor: TokenEncryptor,
     include_auth: bool = True,
+    is_email_duplicate: bool = False,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
@@ -124,6 +157,9 @@ def _account_to_summary(
         email=account.email,
         alias=account.alias,
         display_name=account.alias or account.email,
+        workspace_id=account.workspace_id,
+        workspace_label=account.workspace_label,
+        seat_type=account.seat_type,
         plan_type=plan_type,
         status=effective_status.value,
         usage=AccountUsage(
@@ -145,6 +181,7 @@ def _account_to_summary(
         auth=auth_status,
         limit_warmup_enabled=account.limit_warmup_enabled,
         limit_warmup=_limit_warmup_to_status(limit_warmup),
+        is_email_duplicate=is_email_duplicate,
     )
 
 
@@ -178,6 +215,9 @@ def _effective_status_from_usage(
         runtime_reset=float(account.reset_at) if account.reset_at else None,
         secondary_used=secondary_used_percent,
         secondary_reset=secondary_usage.reset_at if secondary_usage is not None else None,
+        credits_has=_first_not_none(primary_usage, secondary_usage, "credits_has"),
+        credits_unlimited=_first_not_none(primary_usage, secondary_usage, "credits_unlimited"),
+        credits_balance=_first_not_none(primary_usage, secondary_usage, "credits_balance"),
     )
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
         if (
@@ -188,6 +228,16 @@ def _effective_status_from_usage(
             return status
         return account.status
     return status
+
+
+def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):
+    if primary_usage is not None:
+        value = getattr(primary_usage, field)
+        if value is not None:
+            return value
+    if secondary_usage is not None:
+        return getattr(secondary_usage, field)
+    return None
 
 
 def _effective_usage_windows(
@@ -239,12 +289,9 @@ def _decrypt_token(encryptor: TokenEncryptor, encrypted: bytes | None) -> str | 
 def _token_expiry(token: str | None) -> datetime | None:
     if not token:
         return None
-    claims = extract_id_token_claims(token)
-    exp = claims.exp
-    if isinstance(exp, (int, float)):
-        return datetime.fromtimestamp(exp, tz=timezone.utc)
-    if isinstance(exp, str) and exp.isdigit():
-        return datetime.fromtimestamp(int(exp), tz=timezone.utc)
+    expires_ms = token_expiry_epoch_ms(token)
+    if expires_ms is not None:
+        return datetime.fromtimestamp(expires_ms / 1000, tz=timezone.utc)
     return None
 
 

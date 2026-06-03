@@ -14,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
+const WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_PROMPT_MAX_LENGTH = 512;
 
@@ -24,20 +25,29 @@ export type RoutingSettingsProps = {
 };
 
 export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps) {
+  const [warmupModel, setWarmupModel] = useState(settings.warmupModel);
   const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
     String(settings.openaiCacheAffinityMaxAgeSeconds),
+  );
+  const [relativeAvailabilityPower, setRelativeAvailabilityPower] = useState(
+    String(settings.relativeAvailabilityPower),
+  );
+  const [relativeAvailabilityTopK, setRelativeAvailabilityTopK] = useState(
+    String(settings.relativeAvailabilityTopK),
   );
   const [limitWarmupModel, setLimitWarmupModel] = useState(settings.limitWarmupModel);
   const [limitWarmupPrompt, setLimitWarmupPrompt] = useState(settings.limitWarmupPrompt);
   const [limitWarmupCooldown, setLimitWarmupCooldown] = useState(String(settings.limitWarmupCooldownSeconds));
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
-    void onSave(buildSettingsUpdateRequest(settings, patch));
+    void onSave(buildSettingsUpdateRequest(patch));
 
   const parsedCacheAffinityTtl = Number.parseInt(cacheAffinityTtl, 10);
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const warmupModelChanged = warmupModel.trim() !== settings.warmupModel;
+  const warmupModelValid = warmupModel.trim().length > 0 && warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(limitWarmupCooldown);
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
   const limitWarmupFieldsChanged =
@@ -50,6 +60,24 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
     limitWarmupPrompt.trim().length > 0 &&
     limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
     limitWarmupCooldownValid;
+
+  const parsedRelativeAvailabilityPower = Number.parseFloat(relativeAvailabilityPower);
+  const relativeAvailabilityPowerValid =
+    Number.isFinite(parsedRelativeAvailabilityPower) && parsedRelativeAvailabilityPower > 0;
+  const relativeAvailabilityPowerChanged =
+    relativeAvailabilityPowerValid && parsedRelativeAvailabilityPower !== settings.relativeAvailabilityPower;
+
+  const relativeAvailabilityTopKTrimmed = relativeAvailabilityTopK.trim();
+  const parsedRelativeAvailabilityTopK = Number(relativeAvailabilityTopKTrimmed);
+  const relativeAvailabilityTopKValid =
+    /^[0-9]+$/.test(relativeAvailabilityTopKTrimmed) &&
+    Number.isInteger(parsedRelativeAvailabilityTopK) &&
+    parsedRelativeAvailabilityTopK >= 1 &&
+    parsedRelativeAvailabilityTopK <= 20;
+  const relativeAvailabilityTopKChanged =
+    relativeAvailabilityTopKValid && parsedRelativeAvailabilityTopK !== settings.relativeAvailabilityTopK;
+
+  const relativeAvailabilitySelected = settings.routingStrategy === "relative_availability";
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -67,6 +95,37 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
         </div>
 
         <div className="divide-y rounded-lg border">
+          <div className="space-y-3 p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium">Warmup model</p>
+                <p className="text-xs text-muted-foreground">
+                  Set the model used by the normal warmup endpoint.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                value={warmupModel}
+                disabled={busy}
+                maxLength={WARMUP_MODEL_MAX_LENGTH}
+                onChange={(event) => setWarmupModel(event.target.value)}
+                className="h-8 text-xs"
+                aria-label="Warmup model"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs sm:w-24"
+                disabled={busy || !warmupModelChanged || !warmupModelValid}
+                onClick={() => void save({ warmupModel: warmupModel.trim() })}
+              >
+                Save warmup model
+              </Button>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between gap-4 p-3">
             <div>
               <p className="text-sm font-medium">Upstream stream transport</p>
@@ -99,18 +158,102 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             </div>
             <Select
               value={settings.routingStrategy}
-              onValueChange={(value) => save({ routingStrategy: value as "usage_weighted" | "round_robin" | "capacity_weighted" })}
+              onValueChange={(value) =>
+                save({
+                  routingStrategy: value as DashboardSettings["routingStrategy"],
+                })
+              }
             >
-              <SelectTrigger className="h-8 w-44 text-xs" disabled={busy}>
+              <SelectTrigger className="h-8 w-48 text-xs" disabled={busy}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align="end">
                 <SelectItem value="capacity_weighted">Capacity weighted</SelectItem>
+                <SelectItem value="relative_availability">Relative availability</SelectItem>
                 <SelectItem value="usage_weighted">Usage weighted</SelectItem>
                 <SelectItem value="round_robin">Round robin</SelectItem>
               </SelectContent>
             </Select>
           </div>
+
+          {relativeAvailabilitySelected ? (
+            <>
+              <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Relative availability power</p>
+                  <p className="text-xs text-muted-foreground">
+                    Raise normalized relative-availability scores to this power before weighted selection.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Input
+                    aria-label="Relative availability power"
+                    type="number"
+                    min={0.1}
+                    step={0.1}
+                    inputMode="decimal"
+                    value={relativeAvailabilityPower}
+                    disabled={busy}
+                    onChange={(event) => setRelativeAvailabilityPower(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && relativeAvailabilityPowerChanged) {
+                        void save({ relativeAvailabilityPower: parsedRelativeAvailabilityPower });
+                      }
+                    }}
+                    className="h-8 w-28 text-xs"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs"
+                    disabled={busy || !relativeAvailabilityPowerChanged}
+                    onClick={() => void save({ relativeAvailabilityPower: parsedRelativeAvailabilityPower })}
+                  >
+                    Save power
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Relative availability top K</p>
+                  <p className="text-xs text-muted-foreground">
+                    Keep only the strongest weighted candidates before the final random draw.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Input
+                    aria-label="Relative availability top K"
+                    type="number"
+                    min={1}
+                    max={20}
+                    step={1}
+                    inputMode="numeric"
+                    value={relativeAvailabilityTopK}
+                    disabled={busy}
+                    onChange={(event) => setRelativeAvailabilityTopK(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && relativeAvailabilityTopKChanged) {
+                        void save({ relativeAvailabilityTopK: parsedRelativeAvailabilityTopK });
+                      }
+                    }}
+                    className="h-8 w-28 text-xs"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs"
+                    disabled={busy || !relativeAvailabilityTopKChanged}
+                    onClick={() => void save({ relativeAvailabilityTopK: parsedRelativeAvailabilityTopK })}
+                  >
+                    Save top K
+                  </Button>
+                </div>
+              </div>
+            </>
+          ) : null}
 
           <div className="flex items-center justify-between p-3">
             <div>
@@ -226,6 +369,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
             </div>
             <div className="flex items-center gap-2">
               <Input
+                aria-label="Prompt-cache affinity TTL"
                 type="number"
                 min={1}
                 step={1}
@@ -233,7 +377,6 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
                 value={cacheAffinityTtl}
                 disabled={busy}
                 onChange={(event) => setCacheAffinityTtl(event.target.value)}
-                aria-label="Prompt-cache affinity TTL"
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && cacheAffinityTtlChanged) {
                     void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl });
@@ -253,6 +396,7 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               </Button>
             </div>
           </div>
+
         </div>
       </div>
     </section>
