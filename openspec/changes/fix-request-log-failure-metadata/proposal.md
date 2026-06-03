@@ -20,4 +20,3 @@ observability behavior change is not anchored to a contract.
 - Keeps migration state linear and safe to install on current `main`.
 - Adds explicit OpenSpec requirements for request-log metadata and migration
   governance.
-

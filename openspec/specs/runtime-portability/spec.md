@@ -52,4 +52,3 @@ The `codex-lb` CLI SHALL provide a `codex-sessions retag` subcommand that rewrit
 - **WHEN** `--codex-home` is provided
 - **THEN** the command uses that path as the Codex data directory
 - **AND** otherwise it falls back to `CODEX_HOME`, `/codex-home` in containers, a discoverable WSL Windows profile Codex directory, or `~/.codex`
-

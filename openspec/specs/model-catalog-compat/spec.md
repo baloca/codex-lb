@@ -101,4 +101,3 @@ When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native 
 - **WHEN** the upstream model catalog contains `gpt-5.5` with `context_window=272000`
 - **THEN** `GET /backend-api/codex/models` returns `gpt-5.5.context_window=272000`
 - **AND** it does not replace that field with `400000`
-

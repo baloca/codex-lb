@@ -113,4 +113,3 @@ If a request owns in-flight bridge session creation and is cancelled or fails af
 - **AND** it is cancelled while closing a stale local bridge session before creating the replacement session
 - **THEN** the in-flight marker is removed or settled
 - **AND** later requests do not remain blocked on that cancelled owner's future
-

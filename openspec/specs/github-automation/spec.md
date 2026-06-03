@@ -29,4 +29,3 @@ The Codex label synchronization script MUST distinguish GitHub write-permission 
 
 - **WHEN** the script cannot read required PR state, check state, merge state, or Codex review evidence
 - **THEN** the workflow fails rather than silently treating the PR as synchronized
-

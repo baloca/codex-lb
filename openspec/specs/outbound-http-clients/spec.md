@@ -104,4 +104,3 @@ Callers that use the default shared outbound HTTP session or retry client MUST l
 - **WHEN** the application is shutting down
 - **AND** active leases still exist on the current or retired shared client
 - **THEN** global HTTP client close is allowed to force-close those clients instead of waiting indefinitely for long-lived streams
-

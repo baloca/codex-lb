@@ -28,4 +28,3 @@ The beta release sync workflow SHALL close open automation-managed beta release 
 - **AND** the PR lacks the beta automation sentinel text or carries a protected operator label
 - **WHEN** cleanup evaluates open beta PRs
 - **THEN** the workflow does not close or delete that PR
-

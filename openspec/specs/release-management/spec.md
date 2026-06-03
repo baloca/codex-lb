@@ -72,4 +72,3 @@ A beta-tested release train SHALL be promoted by merging the normal release-plea
 - **THEN** release-please creates the stable `v1.19.0` release
 - **AND** the release publishing workflow publishes stable artifacts for `1.19.0`
 - **AND** stable Docker aliases `latest`, `1`, and `1.19` are updated only by the stable release
-

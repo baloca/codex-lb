@@ -10,4 +10,3 @@
   - local routing failure metadata behavior
   - migration linearization for new request-log columns
 - [x] Run `uv run ruff check`, `uv run ty check`, and migration checks relevant to this change.
-

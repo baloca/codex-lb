@@ -94,4 +94,3 @@ The application MUST resolve its default data directory from operator intent bef
 - **WHEN** application settings are loaded
 - **THEN** each explicitly configured related path keeps its configured value
 - **AND** only omitted related paths derive from the resolved data directory
-

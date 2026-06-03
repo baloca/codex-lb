@@ -14,4 +14,3 @@ analytics.
   `no_additional_quota_eligible_accounts`
 - **THEN** request-log metadata stores `upstream_error_code` with that exact code
 - **AND** request-log metadata stores `upstream_status_code = null`
-

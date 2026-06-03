@@ -37,4 +37,3 @@ Relative-availability selection diagnostics SHALL identify accounts using stable
 - **WHEN** relative-availability routing logs candidate or winner diagnostics
 - **THEN** the log message includes the candidate account ID
 - **AND** the log message does not include the account email address
-
