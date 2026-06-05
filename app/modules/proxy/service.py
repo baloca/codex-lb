@@ -12026,6 +12026,7 @@ class ProxyService:
                     if selection.lease is not None:
                         if account_selection_lease_kind == "response_create":
                             pre_acquired_account_response_create_lease = selection.lease
+                            account_leases.append(selection.lease)
                         else:
                             current_account_lease = selection.lease
                             account_leases.append(selection.lease)
