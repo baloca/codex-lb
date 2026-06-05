@@ -230,6 +230,14 @@ _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.3-codex": 128_000,
 }
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
+_RESPONSES_ROUTE_POLICY_HEADER = "x-codex-lb-route-policy"
+_RESPONSES_STATELESS_BATCH_POLICY = "responses_stateless_batch"
+_RESPONSES_STATELESS_BATCH_CONFLICT_HEADERS: Final[tuple[str, ...]] = (
+    "session_id",
+    "x-codex-session-id",
+    "x-codex-conversation-id",
+    "x-codex-turn-state",
+)
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -296,6 +304,56 @@ def _is_openai_sdk_request(
         payload_dict = cast("Mapping[str, JsonValue]", payload)
         return _accepts_event_stream(request) or payload_dict.get("messages") is not None
     return _accepts_event_stream(request) or payload.messages is not None
+
+
+def _responses_route_policy(request: Request) -> str | None:
+    raw_value = request.headers.get(_RESPONSES_ROUTE_POLICY_HEADER)
+    if raw_value is None or not raw_value.strip():
+        return None
+    return raw_value.strip().lower().replace("-", "_")
+
+
+def _route_policy_error_response(
+    request: Request,
+    *,
+    code: str,
+    message: str,
+    route_policy: str | None,
+) -> JSONResponse:
+    headers = (
+        {_RESPONSES_ROUTE_POLICY_HEADER: route_policy} if route_policy == _RESPONSES_STATELESS_BATCH_POLICY else None
+    )
+    return _logged_error_json_response(
+        request,
+        400,
+        openai_error(code, message, error_type="invalid_request_error"),
+        headers=headers,
+    )
+
+
+def _stateless_batch_route_conflict(
+    request: Request,
+    payload: ResponsesRequest,
+) -> str | None:
+    if payload.stream is True:
+        return "responses_stateless_batch requires stream=false"
+    if payload.previous_response_id:
+        return "responses_stateless_batch does not support previous_response_id"
+    if payload.conversation:
+        return "responses_stateless_batch does not support conversation"
+    if payload.prompt_cache_key:
+        return "responses_stateless_batch does not support prompt_cache_key"
+    for header_name in _RESPONSES_STATELESS_BATCH_CONFLICT_HEADERS:
+        header_value = request.headers.get(header_name)
+        if isinstance(header_value, str) and header_value.strip():
+            return f"responses_stateless_batch does not support {header_name}"
+    return None
+
+
+def _mark_route_policy(response: Response, route_policy: str | None) -> Response:
+    if route_policy is not None:
+        response.headers[_RESPONSES_ROUTE_POLICY_HEADER] = route_policy
+    return response
 
 
 async def _thread_goal_payload_from_request(request: Request) -> dict[str, JsonValue]:
@@ -558,6 +616,14 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    route_policy = _responses_route_policy(request)
+    if route_policy is not None and route_policy != _RESPONSES_STATELESS_BATCH_POLICY:
+        return _route_policy_error_response(
+            request,
+            code="route_policy_unsupported",
+            message=f"Unsupported responses route policy: {route_policy}",
+            route_policy=route_policy,
+        )
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
@@ -568,6 +634,25 @@ async def v1_responses(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
+    if route_policy == _RESPONSES_STATELESS_BATCH_POLICY:
+        conflict = _stateless_batch_route_conflict(request, responses_payload)
+        if conflict is not None:
+            return _route_policy_error_response(
+                request,
+                code="route_policy_conflict",
+                message=conflict,
+                route_policy=route_policy,
+            )
+        response = await _collect_responses(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            prefer_http_bridge=False,
+        )
+        return _mark_route_policy(response, route_policy)
     if responses_payload.stream:
         return await _stream_responses(
             request,
