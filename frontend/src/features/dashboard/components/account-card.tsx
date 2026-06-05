@@ -71,6 +71,14 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
   const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+  const displayCredits = account.creditsBalance ?? (
+    weeklyOnly
+      ? account.remainingCreditsSecondary
+      : (account.remainingCreditsSecondary ?? account.remainingCreditsPrimary)
+  );
+  const creditsLabel = account.creditsUnlimited ? "Unlimited" : (
+    displayCredits === null || displayCredits === undefined ? "-" : displayCredits.toFixed(2)
+  );
 
   const primaryReset = formatQuotaResetLabel(account.resetAtPrimary ?? null);
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
@@ -141,6 +149,13 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
         </Button>
       </div>
 
+      <div className="mt-3 text-xs text-muted-foreground">
+        Credits:{" "}
+        <span className="font-medium tabular-nums text-foreground">
+          {creditsLabel}
+        </span>
+      </div>
+
       {/* Actions */}
       <div className="mt-3 flex items-center gap-1.5 border-t pt-3">
         <Button
@@ -165,7 +180,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             Resume
           </Button>
         )}
-        {status === "deactivated" && (
+        {(status === "reauth" || status === "deactivated") && (
           <Button
             type="button"
             size="sm"

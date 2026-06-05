@@ -1846,6 +1846,11 @@ async def _inline_input_image_urls(
         if not isinstance(item, dict):
             updated_input.append(item)
             continue
+        if item.get("type") == "input_image":
+            updated_item, item_changed = await _inline_content_images(item, session, connect_timeout)
+            updated_input.append(updated_item)
+            changed = changed or item_changed
+            continue
         content = item.get("content")
         updated_content, content_changed = await _inline_content_images(content, session, connect_timeout)
         if content_changed:
@@ -2046,6 +2051,8 @@ async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str]
         if not sockaddr:
             return None
         addr = sockaddr[0]
+        if not isinstance(addr, str):
+            return None
         ip = _parse_ip_literal(addr)
         if ip is None:
             return None
@@ -2491,10 +2498,12 @@ async def _stream_responses_with_session(
                         error_message = exc.message or str(exc)
                     if error_code is None:
                         error_code = "upstream_error"
+                    response_error_code = cast(str, error_code)
+                    response_error_message = cast(str, error_message)
                     if raise_for_status:
                         raise ProxyResponseError(exc.status, error_payload) from exc
                     yield format_sse_event(
-                        response_failed_event(error_code, error_message, response_id=get_request_id())
+                        response_failed_event(response_error_code, response_error_message, response_id=get_request_id())
                     )
                     return
 
@@ -2543,7 +2552,11 @@ async def _stream_responses_with_session(
         error_code = "upstream_unavailable"
         error_message = "Upstream circuit breaker is open"
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+            response_failed_event(
+                "upstream_unavailable",
+                "Upstream circuit breaker is open",
+                response_id=get_request_id(),
+            ),
         )
         return
     except CodexTransportError as exc:
@@ -2554,8 +2567,9 @@ async def _stream_responses_with_session(
             operation="stream",
             exc=exc,
         )
+        response_error_message = cast(str, error_message)
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
         return
     except aiohttp.ClientError as exc:
@@ -2566,8 +2580,9 @@ async def _stream_responses_with_session(
             operation="stream",
             exc=exc,
         )
+        response_error_message = cast(str, error_message)
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
         return
     except asyncio.CancelledError:
@@ -2585,8 +2600,9 @@ async def _stream_responses_with_session(
                 if route is not None
                 else str(exc) or "Request to upstream timed out"
             )
+            response_error_message = cast(str, error_message)
             yield format_sse_event(
-                response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+                response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
             )
             return
         now = time.monotonic()
@@ -2619,10 +2635,11 @@ async def _stream_responses_with_session(
                 if route is not None
                 else str(exc) or "Request to upstream timed out"
             )
+            response_error_message = cast(str, error_message)
             yield format_sse_event(
                 response_failed_event(
                     "upstream_unavailable",
-                    error_message,
+                    response_error_message,
                     response_id=get_request_id(),
                 ),
             )
@@ -2645,7 +2662,10 @@ async def _stream_responses_with_session(
             operation="stream",
             exc=exc,
         )
-        yield format_sse_event(response_failed_event("upstream_error", error_message, response_id=get_request_id()))
+        response_error_message = cast(str, error_message)
+        yield format_sse_event(
+            response_failed_event("upstream_error", response_error_message, response_id=get_request_id())
+        )
         return
     else:
         if not seen_terminal:

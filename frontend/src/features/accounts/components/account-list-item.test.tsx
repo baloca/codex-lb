@@ -120,6 +120,54 @@ describe("AccountListItem", () => {
     expect(screen.getByTestId("mini-quota-track-weekly-fill")).toHaveStyle({ width: "73%" });
   });
 
+  it("marks burn-first accounts in the list", () => {
+    const account = createAccountSummary({ routingPolicy: "burn_first" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Burn first")).toBeInTheDocument();
+  });
+
+  it("marks preserved accounts in the list", () => {
+    const account = createAccountSummary({ routingPolicy: "preserve" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Preserve")).toBeInTheDocument();
+  });
+
+  it("marks normal accounts in the list", () => {
+    const account = createAccountSummary({ routingPolicy: "normal" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Normal")).toBeInTheDocument();
+  });
+
+  it("hides routing policy badges for accounts that require operator recovery", () => {
+    const { rerender } = render(
+      <AccountListItem
+        account={createAccountSummary({ routingPolicy: "normal", status: "reauth_required" })}
+        selected={false}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Re-auth required")).toBeInTheDocument();
+    expect(screen.queryByText("Normal")).not.toBeInTheDocument();
+
+    rerender(
+      <AccountListItem
+        account={createAccountSummary({ routingPolicy: "preserve", status: "deactivated" })}
+        selected={false}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Deactivated")).toBeInTheDocument();
+    expect(screen.queryByText("Preserve")).not.toBeInTheDocument();
+  });
+
   it("keeps workspace context visible when a display alias uses the email subtitle", () => {
     const account = createAccountSummary({
       displayName: "Work seat",

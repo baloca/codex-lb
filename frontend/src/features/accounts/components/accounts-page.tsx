@@ -14,6 +14,7 @@ import { AuthExportDialog } from "@/features/accounts/components/auth-export-dia
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -32,10 +33,13 @@ export function AccountsPage() {
     pauseMutation,
     resumeMutation,
     setAliasMutation,
-    deleteMutation,
-    exportAuthMutation,
     limitWarmupMutation,
+    updateMutation,
+    deleteMutation,
+    routingPolicyMutation,
+    exportAuthMutation,
   } = useAccounts();
+  const { upstreamProxyQuery, accountBindingMutation } = useUpstreamProxyAdmin();
   const oauth = useOauth();
 
   const importDialog = useDialogState();
@@ -92,18 +96,25 @@ export function AccountsPage() {
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
+    limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
+    routingPolicyMutation.isPending ||
     exportAuthMutation.isPending ||
-    limitWarmupMutation.isPending;
+    updateMutation.isPending ||
+    accountBindingMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
+    getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
+    getErrorMessageOrNull(routingPolicyMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
-    getErrorMessageOrNull(limitWarmupMutation.error);
+    getErrorMessageOrNull(updateMutation.error) ||
+    getErrorMessageOrNull(upstreamProxyQuery.error) ||
+    getErrorMessageOrNull(accountBindingMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -152,6 +163,22 @@ export function AccountsPage() {
             }}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
+            }
+            onRoutingPolicyChange={(accountId, routingPolicy) =>
+              void routingPolicyMutation.mutateAsync({
+                accountId,
+                routingPolicy,
+              })
+            }
+            onSecurityWorkAuthorizedChange={(accountId, enabled) =>
+              void updateMutation.mutateAsync({
+                accountId,
+                securityWorkAuthorized: enabled,
+              })
+            }
+            upstreamProxyAdmin={upstreamProxyQuery.data ?? null}
+            onProxyBindingSave={(accountId, payload) =>
+              accountBindingMutation.mutateAsync({ accountId, payload })
             }
           />
         </div>

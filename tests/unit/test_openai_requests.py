@@ -81,6 +81,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
         "safety_identifier": "safe_123",
         "temperature": 0.2,
         "top_p": 0.9,
+        "truncation": "auto",
         "user": "cursor-user",
         "custom_field": "kept",
     }
@@ -93,6 +94,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
     assert "safety_identifier" not in dumped
     assert "temperature" not in dumped
     assert "top_p" not in dumped
+    assert "truncation" not in dumped
     assert "user" not in dumped
     assert dumped["custom_field"] == "kept"
 
@@ -982,6 +984,14 @@ def test_extract_input_image_file_references_collects_multi_message_paths():
             ],
         },
         {"type": "input_image", "image_url": "sediment://file_b"},
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [
+                {"type": "input_text", "text": "tool image"},
+                {"type": "input_image", "file_id": "file_tool"},
+            ],
+        },
     ]
 
     references = extract_input_image_file_references(input_value)
@@ -989,4 +999,26 @@ def test_extract_input_image_file_references_collects_multi_message_paths():
     assert [(reference.item_index, reference.content_index, reference.file_id) for reference in references] == [
         (0, 1, "file_a"),
         (1, None, "file_b"),
+        (2, None, "file_tool"),
+    ]
+
+
+def test_extract_input_image_file_references_collects_tool_output_paths():
+    input_value: list[JsonValue] = [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [
+                {"type": "input_text", "text": "ignore"},
+                {"type": "input_image", "file_id": "file_tool"},
+                {"type": "input_image", "image_url": "sediment://file_nested"},
+            ],
+        }
+    ]
+
+    references = extract_input_image_file_references(input_value)
+
+    assert [(reference.item_index, reference.content_index, reference.file_id) for reference in references] == [
+        (0, None, "file_tool"),
+        (0, None, "file_nested"),
     ]
