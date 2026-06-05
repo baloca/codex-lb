@@ -651,6 +651,8 @@ async def v1_responses(
             codex_session_affinity=False,
             openai_cache_affinity=False,
             prefer_http_bridge=False,
+            account_selection_lease_kind="response_create",
+            wait_for_account_response_create_capacity=True,
         )
         return _mark_route_policy(response, route_policy)
     if responses_payload.stream:
@@ -2276,6 +2278,8 @@ async def _collect_responses(
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
     prefer_http_bridge: bool = False,
+    account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+    wait_for_account_response_create_capacity: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -2322,6 +2326,8 @@ async def _collect_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
         )
     try:
         response_payload = await _collect_responses_payload(stream)

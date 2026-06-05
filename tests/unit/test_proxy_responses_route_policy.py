@@ -61,6 +61,8 @@ async def test_v1_responses_stateless_batch_disables_bridge_and_cache_affinity(m
     assert captured["kwargs"]["codex_session_affinity"] is False
     assert captured["kwargs"]["openai_cache_affinity"] is False
     assert captured["kwargs"]["prefer_http_bridge"] is False
+    assert captured["kwargs"]["account_selection_lease_kind"] == "response_create"
+    assert captured["kwargs"]["wait_for_account_response_create_capacity"] is True
 
 
 @pytest.mark.asyncio

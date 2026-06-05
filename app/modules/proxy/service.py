@@ -767,6 +767,8 @@ class ProxyService:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         request_transport: str = _REQUEST_TRANSPORT_HTTP,
+        account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+        wait_for_account_response_create_capacity: bool = False,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream", payload, headers)
         filtered = filter_inbound_headers(headers)
@@ -780,6 +782,8 @@ class ProxyService:
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             request_transport=request_transport,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
         )
 
     def stream_http_responses(
@@ -11782,6 +11786,8 @@ class ProxyService:
         request_transport: str,
         rewritten_file_account_id: str | None = None,
         upstream_stream_transport_override: str | None = None,
+        account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+        wait_for_account_response_create_capacity: bool = False,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         start = time.monotonic()
@@ -11841,6 +11847,7 @@ class ProxyService:
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
         account_leases: list[AccountLease] = []
+        account_selection_wait_logged = False
         estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
         )
@@ -11961,7 +11968,7 @@ class ProxyService:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
-                            lease_kind="stream",
+                            lease_kind=account_selection_lease_kind,
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=not file_required_preferred_account,
                         )
@@ -11993,10 +12000,35 @@ class ProxyService:
                         _apply_error_metadata(event["response"]["error"], error)
                         yield format_sse_event(event)
                         return
+                    if (
+                        wait_for_account_response_create_capacity
+                        and not selection.account
+                        and _is_local_account_cap_code(selection.error_code)
+                    ):
+                        remaining_budget = _remaining_budget_seconds(deadline)
+                        if remaining_budget <= 0:
+                            break
+                        if not account_selection_wait_logged:
+                            logger.info(
+                                "Responses stateless batch waiting for account response-create capacity "
+                                "request_id=%s model=%s error_code=%s remaining_budget=%.2f",
+                                request_id,
+                                payload.model,
+                                selection.error_code,
+                                remaining_budget,
+                            )
+                            account_selection_wait_logged = True
+                        await asyncio.sleep(min(0.25, max(0.01, remaining_budget)))
+                        continue
                     account = selection.account
-                    current_account_lease = selection.lease
+                    current_account_lease: AccountLease | None = None
+                    pre_acquired_account_response_create_lease: AccountLease | None = None
                     if selection.lease is not None:
-                        account_leases.append(selection.lease)
+                        if account_selection_lease_kind == "response_create":
+                            pre_acquired_account_response_create_lease = selection.lease
+                        else:
+                            current_account_lease = selection.lease
+                            account_leases.append(selection.lease)
                     if (
                         not account
                         and require_security_work_authorized
@@ -12317,6 +12349,9 @@ class ProxyService:
                                 request_transport=request_transport,
                                 preferred_account_id=preferred_account_id,
                                 tool_call_dedupe=tool_call_dedupe,
+                                pre_acquired_account_response_create_lease=pre_acquired_account_response_create_lease,
+                                wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
+                                account_response_create_wait_deadline=deadline,
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
@@ -12683,6 +12718,8 @@ class ProxyService:
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
                                 tool_call_dedupe=tool_call_dedupe,
+                                wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
+                                account_response_create_wait_deadline=deadline,
                             ):
                                 yield line
                         except ProxyResponseError as retry_exc:
@@ -12969,6 +13006,9 @@ class ProxyService:
         request_transport: str,
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
+        pre_acquired_account_response_create_lease: AccountLease | None = None,
+        wait_for_account_response_create_capacity: bool = False,
+        account_response_create_wait_deadline: float | None = None,
     ) -> AsyncIterator[str]:
         account_id_value = account.id
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -12995,7 +13035,7 @@ class ProxyService:
             tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
         response_create_lease = AdmissionLease(None, stage="response_create", request_id=request_id)
-        account_response_create_lease: AccountLease | None = None
+        account_response_create_lease = pre_acquired_account_response_create_lease
         api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
@@ -13013,11 +13053,20 @@ class ProxyService:
 
         try:
             route = await self._resolve_upstream_route_for_account(account, operation="responses")
-            account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
-                account_id=account.id,
-                request_id=request_id,
-                surface="stream",
-            )
+            if account_response_create_lease is None:
+                if wait_for_account_response_create_capacity and account_response_create_wait_deadline is not None:
+                    account_response_create_lease = await self._acquire_account_response_create_lease_or_wait(
+                        account_id=account.id,
+                        request_id=request_id,
+                        surface="stream",
+                        deadline=account_response_create_wait_deadline,
+                    )
+                else:
+                    account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
+                        account_id=account.id,
+                        request_id=request_id,
+                        surface="stream",
+                    )
             response_create_lease = await self._get_work_admission().acquire_response_create()
             if upstream_stream_transport is not None:
                 stream = _call_stream_with_supported_optional_kwargs(
@@ -14328,6 +14377,57 @@ class ProxyService:
                 error_type="rate_limit_error",
             ),
         )
+
+    async def _acquire_account_response_create_lease_or_wait(
+        self,
+        *,
+        account_id: str,
+        request_id: str,
+        surface: str,
+        deadline: float,
+    ) -> AccountLease:
+        wait_logged = False
+        while True:
+            lease = await self._load_balancer.acquire_account_lease(
+                account_id,
+                kind="response_create",
+            )
+            if lease is not None:
+                return lease
+            remaining_budget = _remaining_budget_seconds(deadline)
+            if remaining_budget <= 0:
+                logger.warning(
+                    "Responses account response-create wait budget exhausted request_id=%s surface=%s account_id=%s",
+                    request_id,
+                    surface,
+                    account_id,
+                )
+                raise ProxyResponseError(
+                    429,
+                    openai_error(
+                        "account_response_create_cap",
+                        "Account response-create capacity is exhausted",
+                        error_type="rate_limit_error",
+                    ),
+                )
+            if not wait_logged:
+                inflight_create, inflight_stream, leased_tokens = await self._load_balancer.account_pressure_snapshot(
+                    account_id
+                )
+                logger.info(
+                    "Responses waiting for account response-create capacity request_id=%s "
+                    "surface=%s account_id=%s inflight_create=%s inflight_stream=%s "
+                    "leased_tokens=%.3f remaining_budget=%.2f",
+                    request_id,
+                    surface,
+                    account_id,
+                    inflight_create,
+                    inflight_stream,
+                    leased_tokens,
+                    remaining_budget,
+                )
+                wait_logged = True
+            await asyncio.sleep(min(0.25, max(0.01, remaining_budget)))
 
     async def check_opportunistic_admission(
         self,
