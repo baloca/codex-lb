@@ -88,10 +88,29 @@ async def test_v1_responses_stateless_batch_cached_allows_prompt_cache_key(monke
     assert response.headers["x-codex-lb-route-policy"] == "responses_stateless_batch_cached"
     assert forwarded_payload.prompt_cache_key == "cache_123"
     assert captured["kwargs"]["codex_session_affinity"] is False
-    assert captured["kwargs"]["openai_cache_affinity"] is False
+    assert captured["kwargs"]["openai_cache_affinity"] is True
     assert captured["kwargs"]["prefer_http_bridge"] is False
     assert captured["kwargs"]["account_selection_lease_kind"] == "response_create"
     assert captured["kwargs"]["wait_for_account_response_create_capacity"] is True
+
+
+def test_cached_stateless_batch_affinity_policy_pins_prompt_cache_key_to_account():
+    from app.db.models import StickySessionKind
+    from app.modules.proxy.affinity import _sticky_key_for_responses_request
+
+    affinity = _sticky_key_for_responses_request(
+        _payload(stream=False, prompt_cache_key="cache_123").to_responses_request(),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=1800,
+        sticky_threads_enabled=False,
+    )
+
+    assert affinity.key == "cache_123"
+    assert affinity.kind == StickySessionKind.PROMPT_CACHE
+    assert affinity.reallocate_sticky is False
+    assert affinity.max_age_seconds == 1800
 
 
 @pytest.mark.asyncio

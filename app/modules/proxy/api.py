@@ -665,7 +665,7 @@ async def v1_responses(
             context,
             api_key,
             codex_session_affinity=False,
-            openai_cache_affinity=False,
+            openai_cache_affinity=route_policy == _RESPONSES_STATELESS_BATCH_CACHED_POLICY,
             prefer_http_bridge=False,
             account_selection_lease_kind="response_create",
             wait_for_account_response_create_capacity=True,
