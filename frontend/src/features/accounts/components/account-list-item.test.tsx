@@ -53,6 +53,29 @@ describe("AccountListItem", () => {
     expect(screen.getByText("Reset in 1d")).toBeInTheDocument();
   });
 
+  it("shows only the monthly row for monthly-only accounts", () => {
+    const account = createAccountSummary({
+      planType: "free",
+      usage: {
+        primaryRemainingPercent: null,
+        secondaryRemainingPercent: null,
+        monthlyRemainingPercent: 73,
+      },
+      resetAtPrimary: null,
+      resetAtSecondary: null,
+      resetAtMonthly: "2026-01-31T12:00:00.000Z",
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: 43_200,
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.queryByText("5h")).not.toBeInTheDocument();
+    expect(screen.queryByText("Weekly")).not.toBeInTheDocument();
+    expect(screen.getByText("Monthly")).toBeInTheDocument();
+  });
+
   it("renders legacy primary quota data without window metadata", () => {
     const account = createAccountSummary({
       usage: {
@@ -173,6 +196,7 @@ describe("AccountListItem", () => {
       displayName: "Work seat",
       email: "work@example.com",
       planType: "team",
+      chatgptAccountId: null,
       workspaceLabel: "Design Workspace",
       seatType: "member",
     });
@@ -183,5 +207,20 @@ describe("AccountListItem", () => {
     expect(
       screen.getByText((_, element) => element?.textContent === "work@example.com | Team | Design Workspace | Member"),
     ).toBeInTheDocument();
+  });
+
+  it("uses ChatGPT account id before workspace metadata or unknown fallback", () => {
+    const account = createAccountSummary({
+      planType: "team",
+      workspaceId: "legacy-workspace-id",
+      workspaceLabel: "Legacy Workspace",
+      chatgptAccountId: "chatgpt-workspace-123",
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Team | chatgpt-workspace-123")).toBeInTheDocument();
+    expect(screen.queryByText(/Legacy Workspace/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Personal \/ unknown workspace/)).not.toBeInTheDocument();
   });
 });

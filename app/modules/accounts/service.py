@@ -106,6 +106,7 @@ class AccountsService:
         account_id_set = set(account_ids)
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
+        monthly_usage = await self._usage_repo.latest_by_account(window="monthly") if self._usage_repo else {}
         request_usage_rows = await self._repo.list_request_usage_summary_by_account(account_ids)
         limit_warmups_by_account = (
             await self._limit_warmup_repo.latest_by_account(account_ids) if self._limit_warmup_repo else {}
@@ -167,6 +168,7 @@ class AccountsService:
             accounts=accounts,
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
+            monthly_usage=monthly_usage,
             request_usage_by_account=request_usage_by_account,
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,
@@ -279,7 +281,7 @@ class AccountsService:
 
         email = claims.email or DEFAULT_EMAIL
         raw_account_id = claims.account_id
-        account_id = generate_unique_account_id(raw_account_id, email, claims.workspace_id)
+        account_id = generate_unique_account_id(raw_account_id, email, claims.workspace_id, claims.workspace_label)
         plan_type = coerce_account_plan_type(claims.plan_type, DEFAULT_PLAN)
         last_refresh = to_utc_naive(auth.last_refresh_at) if auth.last_refresh_at else utcnow()
 

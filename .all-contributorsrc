@@ -90,6 +90,16 @@
       ]
     },
     {
+      "login": "diogenesc",
+      "name": "Diógenes Castro",
+      "avatar_url": "https://avatars.githubusercontent.com/u/22321454?v=4",
+      "profile": "https://github.com/diogenesc",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "azkore",
       "name": "Eugene Korekin",
       "avatar_url": "https://avatars.githubusercontent.com/u/7746783?v=4",
@@ -660,10 +670,48 @@
       ]
     },
     {
+      "login": "jhordanjw123",
+      "name": "jhordanjw123",
+      "avatar_url": "https://avatars.githubusercontent.com/u/123907587?v=4",
+      "profile": "https://github.com/jhordanjw123",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "mastertyko",
       "name": "mastertyko",
       "avatar_url": "https://avatars.githubusercontent.com/u/11311479?v=4",
       "profile": "https://github.com/mastertyko",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "neoclaw",
+      "name": "NeoClaw",
+      "avatar_url": "https://avatars.githubusercontent.com/u/261536598?v=4",
+      "profile": "https://github.com/NeoClaw",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "abarsegov",
+      "name": "abarsegov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/181010154?v=4",
+      "profile": "https://github.com/abarsegov",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "KakatkarAkshay",
+      "name": "Akshay Kakatkar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49910222?v=4",
+      "profile": "https://github.com/KakatkarAkshay",
       "contributions": [
         "code",
         "test"

@@ -4,6 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
   merge_group:
 
 concurrency:
@@ -101,6 +102,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python .github/scripts/check_all_contributors.py
+
+  beta-release-guard:
+    name: Beta release guard
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" --force
+
+      - name: Require validated canonical beta release PRs
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          python -m scripts.guard_beta_release \
+            --mode pr \
+            --base-ref "origin/${BASE_REF}" \
+            --head-ref "${HEAD_REF}"
 
   frontend-lint:
     name: Frontend lint (eslint)
@@ -235,7 +263,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           python-version: "3.13"
           enable-cache: true
@@ -256,7 +284,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           python-version: "3.13"
           enable-cache: true
@@ -269,7 +297,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -282,17 +309,24 @@ jobs:
       PYTHONFAULTHANDLER: "1"
 
     steps:
+      - name: Skip backend tests for unrelated changes
+        if: needs.changes.outputs.backend != 'true'
+        run: echo "Backend files unchanged; required pytest context satisfied."
+
       - name: Checkout repository
+        if: needs.changes.outputs.backend == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
 
       - name: Set up Bun
+        if: needs.changes.outputs.backend == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
+        if: needs.changes.outputs.backend == 'true'
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
         with:
           path: |
@@ -303,12 +337,14 @@ jobs:
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        if: needs.changes.outputs.backend == 'true'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           python-version: "3.13"
           enable-cache: true
 
       - name: Run tests
+        if: needs.changes.outputs.backend == 'true'
         run: make test-${{ matrix.slice.name }}
 
   test-postgres:
@@ -316,7 +352,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:16
@@ -336,17 +371,24 @@ jobs:
       PYTHONFAULTHANDLER: "1"
 
     steps:
+      - name: Skip PostgreSQL tests for unrelated changes
+        if: needs.changes.outputs.backend != 'true'
+        run: echo "Backend files unchanged; required PostgreSQL context satisfied."
+
       - name: Checkout repository
+        if: needs.changes.outputs.backend == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
 
       - name: Set up Bun
+        if: needs.changes.outputs.backend == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
+        if: needs.changes.outputs.backend == 'true'
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
         with:
           path: |
@@ -357,12 +399,14 @@ jobs:
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        if: needs.changes.outputs.backend == 'true'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           python-version: "3.13"
           enable-cache: true
 
       - name: Run tests
+        if: needs.changes.outputs.backend == 'true'
         run: make test-postgres
 
   migration-check:
@@ -378,7 +422,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           python-version: "3.13"
           enable-cache: true
@@ -413,7 +457,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           python-version: "3.13"
           enable-cache: true
@@ -449,7 +493,7 @@ jobs:
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           python-version: "3.13"
           enable-cache: true
@@ -476,7 +520,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
 
       - name: Build Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f
@@ -620,6 +664,7 @@ jobs:
     needs:
       - changes
       - contributors
+      - beta-release-guard
       - frontend-lint
       - frontend-typecheck
       - frontend-test
