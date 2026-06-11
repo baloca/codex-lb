@@ -15654,6 +15654,69 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stream_wait_for_response_create_capacity_keeps_single_account_candidate(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_wait_response_create_cap")
+    seen_excluded_account_ids: list[set[str]] = []
+    stream_call_count = {"count": 0}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy._service.streaming.retry.asyncio.sleep", AsyncMock())
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        stream_call_count["count"] += 1
+        if stream_call_count["count"] == 1:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error(
+                    "account_response_create_cap",
+                    "Account response-create concurrency limit reached",
+                    error_type="rate_limit_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_waited_cap"}}\n\n'
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-stream"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            account_selection_lease_kind="response_create",
+            wait_for_account_response_create_capacity=True,
+        )
+    ]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "resp_waited_cap"
+    assert stream_call_count["count"] == 2
+    assert seen_excluded_account_ids == [set()]
+
+
+@pytest.mark.asyncio
 async def test_stream_refresh_timeout_before_visible_output_fails_over(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

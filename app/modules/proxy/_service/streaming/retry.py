@@ -763,6 +763,9 @@ class _StreamingRetryMixin:
                                     last_transient_exc = tex
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
+                                    if wait_for_account_response_create_capacity:
+                                        await asyncio.sleep(0.25)
+                                        continue
                                     excluded_account_ids.add(account.id)
                                     break
                                 if _facade()._is_account_neutral_error_code(code):
@@ -1092,7 +1095,10 @@ class _StreamingRetryMixin:
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
-                                excluded_account_ids.add(account.id)
+                                if wait_for_account_response_create_capacity:
+                                    await asyncio.sleep(0.25)
+                                else:
+                                    excluded_account_ids.add(account.id)
                                 continue
                             if _facade()._is_account_neutral_error_code(error_code):
                                 raise
