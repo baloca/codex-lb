@@ -514,6 +514,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         useragent_group: str | None = None,
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
+        selected_account_response_create_lease: AccountLease | None = None,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         account_id_value = account.id
@@ -541,7 +542,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
         response_create_lease = AdmissionLease(None, stage="response_create", request_id=request_id)
-        account_response_create_lease: AccountLease | None = None
+        account_response_create_lease: AccountLease | None = selected_account_response_create_lease
         api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
@@ -559,11 +560,12 @@ class _StreamingMixin(_StreamingRetryMixin):
 
         try:
             route = await proxy._resolve_upstream_route_for_account(account, operation="responses")
-            account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
-                account_id=account.id,
-                request_id=request_id,
-                surface="stream",
-            )
+            if account_response_create_lease is None:
+                account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
+                    account_id=account.id,
+                    request_id=request_id,
+                    surface="stream",
+                )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
             if upstream_stream_transport is not None:
                 stream = _facade()._call_stream_with_supported_optional_kwargs(

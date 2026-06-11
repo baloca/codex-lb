@@ -15717,6 +15717,74 @@ async def test_stream_wait_for_response_create_capacity_keeps_single_account_can
 
 
 @pytest.mark.asyncio
+async def test_stream_uses_selected_response_create_lease_without_reacquiring(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_selected_response_create_lease")
+    selection_lease = AccountLease(
+        lease_id="selected-response-create-lease",
+        account_id=account.id,
+        kind="response_create",
+        acquired_at=time.monotonic(),
+    )
+    released_leases: list[AccountLease | None] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None, lease=selection_lease)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    async def fail_internal_response_create_lease(*args: object, **kwargs: object) -> AccountLease:
+        del args, kwargs
+        pytest.fail("selected response-create lease should be reused instead of reacquired")
+
+    async def release_account_lease(lease: AccountLease | None) -> None:
+        released_leases.append(lease)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield 'data: {"type":"response.completed","response":{"id":"resp_selected_lease"}}\n\n'
+
+    monkeypatch.setattr(
+        service,
+        "_acquire_account_response_create_lease_or_overload",
+        fail_internal_response_create_lease,
+    )
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-stream"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            account_selection_lease_kind="response_create",
+            wait_for_account_response_create_capacity=True,
+        )
+    ]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "resp_selected_lease"
+    assert selection_lease in released_leases
+
+
+@pytest.mark.asyncio
 async def test_stream_refresh_timeout_before_visible_output_fails_over(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

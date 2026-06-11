@@ -314,12 +314,12 @@ class _StreamingRetryMixin:
                         continue
                     account = selection.account
                     current_account_lease: AccountLease | None = None
+                    selected_account_response_create_lease: AccountLease | None = None
                     if selection.lease is not None:
+                        current_account_lease = selection.lease
+                        account_leases.append(selection.lease)
                         if account_selection_lease_kind == "response_create":
-                            account_leases.append(selection.lease)
-                        else:
-                            current_account_lease = selection.lease
-                            account_leases.append(selection.lease)
+                            selected_account_response_create_lease = selection.lease
                     if (
                         not account
                         and require_security_work_authorized
@@ -635,6 +635,14 @@ class _StreamingRetryMixin:
                     transient_retries = 0
                     allow_retry_flag = attempt < max_attempts - 1
                     while True:
+                        stream_account_response_create_lease = selected_account_response_create_lease
+                        selected_account_response_create_lease = None
+                        if stream_account_response_create_lease is not None:
+                            try:
+                                account_leases.remove(stream_account_response_create_lease)
+                            except ValueError:
+                                pass
+                            current_account_lease = None
                         stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                             _facade()._remaining_budget_seconds(deadline),
                         )
@@ -661,6 +669,7 @@ class _StreamingRetryMixin:
                                 useragent_group=useragent_group,
                                 preferred_account_id=preferred_account_id,
                                 tool_call_dedupe=tool_call_dedupe,
+                                selected_account_response_create_lease=stream_account_response_create_lease,
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
