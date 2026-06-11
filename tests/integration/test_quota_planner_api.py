@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -105,6 +105,35 @@ async def test_quota_planner_decisions_api_returns_recent_decisions(async_client
     assert by_key["test-decision-new"]["reason"] == "new"
     assert by_key["test-decision-new"]["details"]["target_peak_at"] == "2026-05-18T13:00:00+00:00"
     assert by_key["test-decision-new"]["details"]["warmup_cycle"] == "20260518:warmup_cycle:1"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_repository_normalizes_aware_decision_timestamps(db_setup):
+    del db_setup
+    scheduled_at = datetime(2026, 6, 11, 8, 30, tzinfo=timezone.utc)
+    executed_at = datetime(2026, 6, 11, 8, 45, tzinfo=timezone.utc)
+
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        decision = await repo.log_decision(
+            mode="shadow",
+            action="reserve",
+            idempotency_key="aware-decision-timestamps",
+            scheduled_at=scheduled_at,
+            executed_at=executed_at,
+            status="skipped",
+        )
+        assert decision.scheduled_at == scheduled_at.replace(tzinfo=None)
+        assert decision.executed_at == executed_at.replace(tzinfo=None)
+
+        updated = await repo.update_decision_status(
+            decision.id,
+            status="executed",
+            executed_at=scheduled_at,
+        )
+
+    assert updated is not None
+    assert updated.executed_at == scheduled_at.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio
