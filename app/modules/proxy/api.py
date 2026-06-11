@@ -235,6 +235,13 @@ _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
 _RESPONSES_ROUTE_POLICY_HEADER = "x-codex-lb-route-policy"
 _RESPONSES_STATELESS_BATCH_POLICY = "responses_stateless_batch"
+_RESPONSES_STATELESS_BATCH_CACHED_POLICY = "responses_stateless_batch_cached"
+_RESPONSES_STATELESS_BATCH_POLICIES: Final[frozenset[str]] = frozenset(
+    {
+        _RESPONSES_STATELESS_BATCH_POLICY,
+        _RESPONSES_STATELESS_BATCH_CACHED_POLICY,
+    }
+)
 _RESPONSES_STATELESS_BATCH_CONFLICT_HEADERS: Final[tuple[str, ...]] = (
     "session_id",
     "x-codex-session-id",
@@ -324,7 +331,7 @@ def _route_policy_error_response(
     route_policy: str | None,
 ) -> JSONResponse:
     headers = (
-        {_RESPONSES_ROUTE_POLICY_HEADER: route_policy} if route_policy == _RESPONSES_STATELESS_BATCH_POLICY else None
+        {_RESPONSES_ROUTE_POLICY_HEADER: route_policy} if route_policy in _RESPONSES_STATELESS_BATCH_POLICIES else None
     )
     return _logged_error_json_response(
         request,
@@ -337,6 +344,8 @@ def _route_policy_error_response(
 def _stateless_batch_route_conflict(
     request: Request,
     payload: ResponsesRequest,
+    *,
+    allow_prompt_cache_key: bool = False,
 ) -> str | None:
     if payload.stream is True:
         return "responses_stateless_batch requires stream=false"
@@ -344,7 +353,7 @@ def _stateless_batch_route_conflict(
         return "responses_stateless_batch does not support previous_response_id"
     if payload.conversation:
         return "responses_stateless_batch does not support conversation"
-    if payload.prompt_cache_key:
+    if payload.prompt_cache_key and not allow_prompt_cache_key:
         return "responses_stateless_batch does not support prompt_cache_key"
     for header_name in _RESPONSES_STATELESS_BATCH_CONFLICT_HEADERS:
         header_value = request.headers.get(header_name)
@@ -620,7 +629,7 @@ async def v1_responses(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     route_policy = _responses_route_policy(request)
-    if route_policy is not None and route_policy != _RESPONSES_STATELESS_BATCH_POLICY:
+    if route_policy is not None and route_policy not in _RESPONSES_STATELESS_BATCH_POLICIES:
         return _route_policy_error_response(
             request,
             code="route_policy_unsupported",
@@ -637,8 +646,12 @@ async def v1_responses(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
-    if route_policy == _RESPONSES_STATELESS_BATCH_POLICY:
-        conflict = _stateless_batch_route_conflict(request, responses_payload)
+    if route_policy in _RESPONSES_STATELESS_BATCH_POLICIES:
+        conflict = _stateless_batch_route_conflict(
+            request,
+            responses_payload,
+            allow_prompt_cache_key=route_policy == _RESPONSES_STATELESS_BATCH_CACHED_POLICY,
+        )
         if conflict is not None:
             return _route_policy_error_response(
                 request,

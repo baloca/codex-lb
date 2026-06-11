@@ -66,6 +66,35 @@ async def test_v1_responses_stateless_batch_disables_bridge_and_cache_affinity(m
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_stateless_batch_cached_allows_prompt_cache_key(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_collect_responses(*args: Any, **kwargs: Any) -> JSONResponse:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return JSONResponse({"id": "resp_cached", "object": "response", "status": "completed"})
+
+    monkeypatch.setattr(proxy_api_module, "_collect_responses", fake_collect_responses)
+
+    response = await proxy_api_module.v1_responses(
+        _request({"x-codex-lb-route-policy": "responses_stateless_batch_cached"}),
+        _payload(stream=False, prompt_cache_key="cache_123"),
+        _context(),
+        None,
+    )
+
+    forwarded_payload = captured["args"][1]
+    assert response.status_code == 200
+    assert response.headers["x-codex-lb-route-policy"] == "responses_stateless_batch_cached"
+    assert forwarded_payload.prompt_cache_key == "cache_123"
+    assert captured["kwargs"]["codex_session_affinity"] is False
+    assert captured["kwargs"]["openai_cache_affinity"] is False
+    assert captured["kwargs"]["prefer_http_bridge"] is False
+    assert captured["kwargs"]["account_selection_lease_kind"] == "response_create"
+    assert captured["kwargs"]["wait_for_account_response_create_capacity"] is True
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_default_route_keeps_existing_bridge_policy(monkeypatch):
     captured: dict[str, Any] = {}
 
@@ -146,5 +175,44 @@ async def test_v1_responses_stateless_batch_rejects_stateful_inputs(
     body = json.loads(bytes(response.body))
     assert response.status_code == 400
     assert response.headers["x-codex-lb-route-policy"] == "responses_stateless_batch"
+    assert body["error"]["code"] == "route_policy_conflict"
+    assert expected_message in body["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("payload_overrides", "headers", "expected_message"),
+    [
+        ({"stream": True}, {}, "requires stream=false"),
+        ({"previous_response_id": "resp_123"}, {}, "previous_response_id"),
+        ({"conversation": "conv_123"}, {}, "conversation"),
+        ({}, {"x-codex-session-id": "session_123"}, "x-codex-session-id"),
+        ({}, {"x-codex-conversation-id": "conversation_123"}, "x-codex-conversation-id"),
+        ({}, {"x-codex-turn-state": "turn_123"}, "x-codex-turn-state"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_v1_responses_stateless_batch_cached_rejects_stateful_inputs(
+    monkeypatch,
+    payload_overrides: dict[str, Any],
+    headers: dict[str, str],
+    expected_message: str,
+):
+    async def fail_collect_responses(*args: Any, **kwargs: Any) -> JSONResponse:
+        del args, kwargs
+        pytest.fail("stateful stateless-batch-cached requests must not reach _collect_responses")
+
+    monkeypatch.setattr(proxy_api_module, "_collect_responses", fail_collect_responses)
+    request_headers = {"x-codex-lb-route-policy": "responses_stateless_batch_cached", **headers}
+
+    response = await proxy_api_module.v1_responses(
+        _request(request_headers),
+        _payload(**payload_overrides),
+        _context(),
+        None,
+    )
+
+    body = json.loads(bytes(response.body))
+    assert response.status_code == 400
+    assert response.headers["x-codex-lb-route-policy"] == "responses_stateless_batch_cached"
     assert body["error"]["code"] == "route_policy_conflict"
     assert expected_message in body["error"]["message"]
