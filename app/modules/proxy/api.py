@@ -567,6 +567,8 @@ async def responses(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        account_selection_lease_kind="response_create",
+        wait_for_account_response_create_capacity=True,
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
@@ -2185,6 +2187,8 @@ async def _stream_responses(
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+    wait_for_account_response_create_capacity: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -2320,6 +2324,8 @@ async def _stream_responses(
             forwarded_request=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
         )
     else:
         stream = context.service.stream_responses(
@@ -2331,6 +2337,8 @@ async def _stream_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
         )
     stream, startup_error = await _probe_stream_startup_error(
         stream,

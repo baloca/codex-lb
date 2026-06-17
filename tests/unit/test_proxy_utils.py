@@ -972,6 +972,41 @@ async def test_stream_responses_returns_before_first_upstream_event(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_route_waits_for_response_create_capacity(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_stream_responses(*args: Any, **kwargs: Any) -> StreamingResponse:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return StreamingResponse(iter(()))
+
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [],
+        }
+    )
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.5",
+        "instructions": "draw",
+        "input": "draw",
+        "tools": [{"type": "image_generation"}],
+    }
+    context = cast(proxy_api.ProxyContext, SimpleNamespace())
+
+    response = await proxy_api.responses(request, payload, context, None)
+
+    assert isinstance(response, StreamingResponse)
+    assert captured["kwargs"]["prefer_http_bridge"] is True
+    assert captured["kwargs"]["account_selection_lease_kind"] == "response_create"
+    assert captured["kwargs"]["wait_for_account_response_create_capacity"] is True
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypatch):
     async def skip_limits(*args, **kwargs):
         del args, kwargs
@@ -1567,16 +1602,16 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_image_generation_
     )
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
 
-    calls: list[str] = []
+    calls: list[dict[str, Any]] = []
 
     async def fake_stream_with_retry(payload, headers, **kwargs):
-        del payload, headers, kwargs
-        calls.append("retry")
+        del payload, headers
+        calls.append(dict(kwargs))
         yield "data: retry\n\n"
 
     async def fake_stream_via_http_bridge(payload, headers, **kwargs):
         del payload, headers, kwargs
-        calls.append("bridge")
+        calls.append({"bridge": True})
         yield "data: bridge\n\n"
 
     monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
@@ -1593,11 +1628,15 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_image_generation_
             api_key=None,
             api_key_reservation=None,
             suppress_text_done_events=False,
+            account_selection_lease_kind="response_create",
+            wait_for_account_response_create_capacity=True,
         )
     ]
 
     assert output == ["data: retry\n\n"]
-    assert calls == ["retry"]
+    assert len(calls) == 1
+    assert calls[0]["account_selection_lease_kind"] == "response_create"
+    assert calls[0]["wait_for_account_response_create_capacity"] is True
 
 
 @pytest.mark.asyncio

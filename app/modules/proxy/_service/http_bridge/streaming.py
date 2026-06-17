@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from collections.abc import AsyncGenerator, Callable
-from typing import Any, AsyncIterator, Mapping, TypeVar, cast
+from typing import Any, AsyncIterator, Literal, Mapping, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -277,6 +277,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_request: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+        wait_for_account_response_create_capacity: bool = False,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -295,6 +297,8 @@ class _HTTPBridgeStreamingMixin:
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -313,6 +317,8 @@ class _HTTPBridgeStreamingMixin:
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+        wait_for_account_response_create_capacity: bool = False,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -357,6 +363,8 @@ class _HTTPBridgeStreamingMixin:
                 request_transport=_REQUEST_TRANSPORT_HTTP,
                 rewritten_file_account_id=rewritten_file_account_id,
                 upstream_stream_transport_override=force_upstream_stream_transport,
+                account_selection_lease_kind=account_selection_lease_kind,
+                wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
             ):
                 yield line
             return
