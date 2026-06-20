@@ -631,6 +631,21 @@ class _HTTPBridgeStreamingMixin:
             request_state.fresh_upstream_request_is_retry_safe = False
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
+        allow_stream_idle_rebind = self._consume_http_bridge_stream_idle_rebind(
+            bridge_session_key,
+            request_state.previous_response_id,
+        )
+        if allow_stream_idle_rebind:
+            _log_http_bridge_event(
+                "stream_idle_previous_response_rebind",
+                bridge_session_key,
+                account_id=request_state.preferred_account_id,
+                model=effective_payload.model,
+                detail="outcome=fresh_durable_session_after_stream_idle_timeout",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=True,
+            )
         while True:
             try:
                 session_or_forward = await self._get_or_create_http_bridge_session(
@@ -652,6 +667,7 @@ class _HTTPBridgeStreamingMixin:
                     forwarded_request=forwarded_request,
                     forwarded_affinity_kind=forwarded_affinity_kind,
                     forwarded_affinity_key=forwarded_affinity_key,
+                    allow_previous_response_recovery_rebind=allow_stream_idle_rebind,
                     durable_lookup=durable_lookup,
                     request_stage=request_state.request_stage,
                     preferred_account_id=request_state.preferred_account_id,
@@ -1484,6 +1500,10 @@ class _HTTPBridgeStreamingMixin:
                                 request_state.request_id,
                                 keepalive_count,
                                 max_keepalive_count,
+                            )
+                            await self._mark_http_bridge_stream_idle_timeout(
+                                session,
+                                previous_response_id=request_state.previous_response_id,
                             )
                             yield format_sse_event(
                                 cast(

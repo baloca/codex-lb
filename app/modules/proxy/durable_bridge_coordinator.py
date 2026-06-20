@@ -178,6 +178,10 @@ class DurableBridgeSessionCoordinator:
             return None
         return _to_lookup(snapshot)
 
+    async def delete_session(self, *, session_id: str) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).delete_session(session_id=session_id)
+
     async def mark_instance_draining(self, *, instance_id: str) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)

@@ -324,6 +324,19 @@ class DurableBridgeRepository:
         await self._session.refresh(row)
         return _to_snapshot(row)
 
+    async def delete_session(self, *, session_id: str) -> bool:
+        async with sqlite_writer_section():
+            await self._session.execute(
+                delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id == session_id)
+            )
+            deleted = await self._session.execute(
+                delete(HttpBridgeSessionRecord)
+                .where(HttpBridgeSessionRecord.id == session_id)
+                .returning(HttpBridgeSessionRecord.id)
+            )
+            await self._session.commit()
+        return deleted.scalar_one_or_none() is not None
+
     async def mark_owner_draining(self, *, instance_id: str) -> int:
         result = await self._session.execute(
             select(HttpBridgeSessionRecord).where(

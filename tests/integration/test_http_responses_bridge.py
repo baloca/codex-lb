@@ -21,7 +21,7 @@ from sqlalchemy import select
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
 from app.core.utils.request_id import reset_request_id, set_request_id
-from app.db.models import Account, AccountStatus, DashboardSettings
+from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionRecord
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy.load_balancer import AccountSelection
@@ -132,6 +132,17 @@ async def _get_account(account_id: str) -> Account:
         return account
 
 
+async def _get_http_bridge_session_records(session_key_value: str) -> list[HttpBridgeSessionRecord]:
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.session_key_value == session_key_value)
+        )
+        records = list(result.scalars().all())
+        for record in records:
+            session.expunge(record)
+        return records
+
+
 async def _wait_for_event(event: asyncio.Event, *, timeout: float = _TEST_SYNC_TIMEOUT_SECONDS) -> None:
     await asyncio.wait_for(event.wait(), timeout=timeout)
 
@@ -166,6 +177,8 @@ def _make_app_settings(
     max_sessions: int = 128,
     queue_limit: int = 8,
     admission_wait_timeout_seconds: float = 0.05,
+    sse_keepalive_interval_seconds: float = 10.0,
+    stream_idle_timeout_seconds: float = 300.0,
     codex_idle_ttl_seconds: float = 900.0,
     codex_prewarm_enabled: bool = False,
     instance_id: str = "instance-a",
@@ -190,7 +203,8 @@ def _make_app_settings(
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
         log_proxy_service_tier_trace=False,
-        stream_idle_timeout_seconds=300.0,
+        sse_keepalive_interval_seconds=sse_keepalive_interval_seconds,
+        stream_idle_timeout_seconds=stream_idle_timeout_seconds,
         openai_prompt_cache_key_derivation_enabled=True,
     )
 
@@ -238,6 +252,8 @@ def _install_bridge_settings_with_limits(
     max_sessions: int = 128,
     queue_limit: int = 8,
     admission_wait_timeout_seconds: float = 0.05,
+    sse_keepalive_interval_seconds: float = 10.0,
+    stream_idle_timeout_seconds: float = 300.0,
     codex_idle_ttl_seconds: float = 900.0,
     prompt_cache_idle_ttl_seconds: float = 3600.0,
     codex_prewarm_enabled: bool = False,
@@ -253,6 +269,8 @@ def _install_bridge_settings_with_limits(
             max_sessions=max_sessions,
             queue_limit=queue_limit,
             admission_wait_timeout_seconds=admission_wait_timeout_seconds,
+            sse_keepalive_interval_seconds=sse_keepalive_interval_seconds,
+            stream_idle_timeout_seconds=stream_idle_timeout_seconds,
             codex_idle_ttl_seconds=codex_idle_ttl_seconds,
             codex_prewarm_enabled=codex_prewarm_enabled,
             instance_id=instance_id,
@@ -381,6 +399,22 @@ class _CreatedOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 class _SilentUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
+
+
+class _PoisonedDurableSessionUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self, *, session_key_value: str, poisoned_session_id_ref: dict[str, str | None]) -> None:
+        super().__init__()
+        self._session_key_value = session_key_value
+        self._poisoned_session_id_ref = poisoned_session_id_ref
+
+    async def send_text(self, text: str) -> None:
+        poisoned_session_id = self._poisoned_session_id_ref.get("value")
+        if poisoned_session_id is not None:
+            records = await _get_http_bridge_session_records(self._session_key_value)
+            if records and records[0].id == poisoned_session_id:
+                self.sent_text.append(text)
+                return
+        await super().send_text(text)
 
 
 class _RecordingUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
@@ -5165,6 +5199,301 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
     assert second.status_code == 200
     assert second.json()["output"][0]["content"][0]["text"] == "OK"
     assert connect_count == 2
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_sdk_retry_rebinds_after_stream_idle_timeout(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        sse_keepalive_interval_seconds=0.001,
+        stream_idle_timeout_seconds=0.003,
+    )
+    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 2)
+
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_spike_idle_retry",
+        "http-bridge-spike-idle-retry@example.com",
+    )
+    account = await _get_account(account_id)
+    prompt_cache_key = "stream-idle-rebind-user-52"
+    poisoned_session_id_ref: dict[str, str | None] = {"value": None}
+    first_upstream = _PoisonedDurableSessionUpstreamWebSocket(
+        session_key_value=prompt_cache_key,
+        poisoned_session_id_ref=poisoned_session_id_ref,
+    )
+    retry_upstream = _PoisonedDurableSessionUpstreamWebSocket(
+        session_key_value=prompt_cache_key,
+        poisoned_session_id_ref=poisoned_session_id_ref,
+    )
+    upstreams = [first_upstream, retry_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = {
+        "model": "gpt-5.5",
+        "instructions": "Return exactly OK.",
+        "input": "hello",
+        "prompt_cache_key": prompt_cache_key,
+    }
+    first = await asyncio.wait_for(
+        async_client.post("/v1/responses", json=payload),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+    first_response_id = first.json()["id"]
+    durable_records = await _get_http_bridge_session_records(prompt_cache_key)
+    assert len(durable_records) == 1
+    original_durable_session_id = durable_records[0].id
+    poisoned_session_id_ref["value"] = original_durable_session_id
+
+    followup_payload = {
+        **payload,
+        "input": "continue",
+        "previous_response_id": first_response_id,
+    }
+    first_attempt = await asyncio.wait_for(
+        async_client.post("/v1/responses", json=followup_payload),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    sdk_retry = await asyncio.wait_for(
+        async_client.post("/v1/responses", json=followup_payload),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert first_attempt.status_code == 502
+    assert first_attempt.json()["error"]["code"] == "stream_idle_timeout"
+    assert sdk_retry.status_code == 200
+    assert sdk_retry.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
+    assert len(first_upstream.sent_text) == 2
+    assert len(retry_upstream.sent_text) == 1
+    assert json.loads(first_upstream.sent_text[1])["previous_response_id"] == first_response_id
+    assert json.loads(retry_upstream.sent_text[0])["previous_response_id"] == first_response_id
+
+    durable_records = await _get_http_bridge_session_records(prompt_cache_key)
+    assert len(durable_records) == 1
+    assert durable_records[0].id != original_durable_session_id
+
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        sessions = list(service._http_bridge_sessions.values())
+
+    assert len(sessions) == 1
+    assert sessions[0].key.affinity_kind == "prompt_cache"
+    assert sessions[0].key.affinity_key == prompt_cache_key
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_eva_style_recovery_succeeds_after_stream_idle_timeout(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        sse_keepalive_interval_seconds=0.001,
+        stream_idle_timeout_seconds=0.003,
+    )
+    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 2)
+
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_spike_eva_recovery",
+        "http-bridge-spike-eva-recovery@example.com",
+    )
+    account = await _get_account(account_id)
+    prompt_cache_key = "spike-eva-recovery-user-52"
+    poisoned_session_id_ref: dict[str, str | None] = {"value": None}
+    first_upstream = _PoisonedDurableSessionUpstreamWebSocket(
+        session_key_value=prompt_cache_key,
+        poisoned_session_id_ref=poisoned_session_id_ref,
+    )
+    recovery_upstream = _PoisonedDurableSessionUpstreamWebSocket(
+        session_key_value=prompt_cache_key,
+        poisoned_session_id_ref=poisoned_session_id_ref,
+    )
+    upstreams = [first_upstream, recovery_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = {
+        "model": "gpt-5.5",
+        "instructions": "Return exactly OK.",
+        "input": "hello",
+        "prompt_cache_key": prompt_cache_key,
+    }
+    first = await asyncio.wait_for(
+        async_client.post("/v1/responses", json=payload),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+    first_response_id = first.json()["id"]
+    durable_records = await _get_http_bridge_session_records(prompt_cache_key)
+    assert len(durable_records) == 1
+    original_durable_session_id = durable_records[0].id
+    poisoned_session_id_ref["value"] = original_durable_session_id
+
+    first_attempt = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                **payload,
+                "input": "continue",
+                "previous_response_id": first_response_id,
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first_attempt.status_code == 502
+    assert first_attempt.json()["error"]["code"] == "stream_idle_timeout"
+    assert await _get_http_bridge_session_records(prompt_cache_key) == []
+
+    recovery = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                **payload,
+                "input": "continue with rebuilt context",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert recovery.status_code == 200
+    assert recovery.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
+    durable_records = await _get_http_bridge_session_records(prompt_cache_key)
+    assert len(durable_records) == 1
+    assert durable_records[0].id != original_durable_session_id
+    assert "previous_response_id" not in json.loads(recovery_upstream.sent_text[0])
 
 
 @pytest.mark.asyncio
