@@ -73,6 +73,14 @@ _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
 
 _MAX_SELECTION_ATTEMPTS = 4
 
+# Small backoff between in-loop re-selection attempts when the only failure is an
+# account capacity cap. The cap is driven by per-account inflight lease counts
+# (runtime state), so retrying within microseconds (sleep(0)) cannot succeed and
+# only churns the runtime lock / DB reload and floods logs. A short sleep lets
+# concurrent leases drain before the next attempt; waiting callers still have
+# their own outer wait loop on top of this.
+_ACCOUNT_CAP_RETRY_BACKOFF_SECONDS = 0.05
+
 _ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
 _STICKY_GRACE_PERIOD_SECONDS = 10.0
 _STICKY_EXISTING_UNSET = object()
@@ -618,7 +626,12 @@ class LoadBalancer:
                 if not selection_states and states:
                     result = SelectionResult(None, "No available accounts")
                     selection_error_code = _account_cap_error_code(lease_kind)
-                    logger.warning(
+                    # Per-attempt cap rejection is expected backpressure on a busy
+                    # account and is retried/waited on by the caller; keep it at
+                    # debug so transient cap pressure does not flood logs. The
+                    # Prometheus counter below and the final request_log row remain
+                    # the durable signal for genuine cap exhaustion.
+                    logger.debug(
                         "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
                         lease_kind,
                         selection_error_code,
@@ -737,7 +750,10 @@ class LoadBalancer:
                     error_message = None
                     selected_states = []
                     selected_account_map = {}
-                    await asyncio.sleep(0)
+                    # selection_error_code is only set for an account capacity cap
+                    # here, so back off briefly instead of busy-spinning: the cap
+                    # depends on inflight leases draining, not on re-reading inputs.
+                    await asyncio.sleep(_ACCOUNT_CAP_RETRY_BACKOFF_SECONDS)
                     continue
                 break
 
