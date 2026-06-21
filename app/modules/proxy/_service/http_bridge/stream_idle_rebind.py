@@ -39,7 +39,10 @@ class _HTTPBridgeStreamIdleRebindMixin:
         if durable_session_id is None:
             return
         try:
-            await self._durable_bridge.delete_session(session_id=durable_session_id)
+            durable_bridge = getattr(self, "_durable_bridge", None)
+            if durable_bridge is None:
+                return
+            await durable_bridge.delete_session(session_id=durable_session_id)
             session.durable_session_id = None
             session.durable_owner_epoch = None
             rebinds = getattr(self, "_http_bridge_stream_idle_rebinds", None)
