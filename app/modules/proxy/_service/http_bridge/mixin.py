@@ -126,6 +126,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _upstream_turn_state_from_socket,
     _websocket_connect_deadline,
 )
+from app.modules.proxy._service.http_bridge.stream_idle_rebind import _HTTPBridgeStreamIdleRebindMixin
 from app.modules.proxy._service.http_bridge.streaming import _HTTPBridgeStreamingMixin
 from app.modules.proxy._service.http_bridge.upstream_events import _HTTPBridgeUpstreamEventsMixin
 from app.modules.proxy._service.observability import (
@@ -217,53 +218,16 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
-_HTTP_BRIDGE_STREAM_IDLE_REBIND_TTL_SECONDS = 180.0
 
 
 class _HTTPBridgeMixin(
+    _HTTPBridgeStreamIdleRebindMixin,
     _HTTPBridgeStreamingMixin,
     _HTTPBridgeOwnerForwardingMixin,
     _HTTPBridgeRequestSubmitMixin,
     _HTTPBridgeUpstreamEventsMixin,
     _HTTPBridgeServiceProtocol,
 ):
-    def _consume_http_bridge_stream_idle_rebind(
-        self,
-        key: "_HTTPBridgeSessionKey",
-        previous_response_id: str | None,
-    ) -> bool:
-        if previous_response_id is None:
-            return False
-        rebinds = getattr(self, "_http_bridge_stream_idle_rebinds", None)
-        if not isinstance(rebinds, dict):
-            return False
-        now = _service_time().monotonic()
-        for rebind_key, expires_at in tuple(rebinds.items()):
-            if expires_at <= now:
-                rebinds.pop(rebind_key, None)
-        return rebinds.pop((key, previous_response_id), None) is not None
-
-    async def _mark_http_bridge_stream_idle_timeout(
-        self,
-        session: "_HTTPBridgeSession",
-        *,
-        previous_response_id: str | None,
-    ) -> None:
-        durable_session_id = session.durable_session_id
-        if durable_session_id is None:
-            return
-        try:
-            await self._durable_bridge.delete_session(session_id=durable_session_id)
-            session.durable_session_id = None
-            session.durable_owner_epoch = None
-            rebinds = getattr(self, "_http_bridge_stream_idle_rebinds", None)
-            if previous_response_id is not None and isinstance(rebinds, dict):
-                rebinds[(session.key, previous_response_id)] = (
-                    _service_time().monotonic() + _HTTP_BRIDGE_STREAM_IDLE_REBIND_TTL_SECONDS
-                )
-        except Exception:
-            logger.warning("Failed to delete stream-idle HTTP bridge durable session", exc_info=True)
-
     async def _http_bridge_pending_count(self, session: "_HTTPBridgeSession") -> int:
         async with session.pending_lock:
             visible_pending_count = sum(
