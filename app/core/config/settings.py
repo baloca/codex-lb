@@ -323,14 +323,6 @@ class Settings(BaseSettings):
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
 
-    # SPIKE 012: per-prompt_cache_key upstream-HTTP connection affinity for the
-    # responses_stateless_batch_cached route. When enabled, requests sharing a
-    # prompt_cache_key reuse a small dedicated connection pool so the per-connection
-    # OpenAI prefix cache stays warm (instead of scattering across the 50-wide pool).
-    cached_route_connection_affinity_enabled: bool = False
-    cached_route_connection_affinity_pool_size: int = 6
-    cached_route_connection_affinity_ttl_seconds: int = 1800
-
     @field_validator("data_dir", mode="before")
     @classmethod
     def _expand_data_dir(cls, value: str | Path) -> Path:

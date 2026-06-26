@@ -38,7 +38,6 @@ from app.core.auth.dependencies import (
     validate_usage_api_key,
 )
 from app.core.clients.files import FileProxyError
-from app.core.clients.http import affinity_cache_key_var
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -663,13 +662,6 @@ async def v1_responses(
                 message=conflict,
                 route_policy=route_policy,
             )
-        if route_policy == _RESPONSES_STATELESS_BATCH_CACHED_POLICY:
-            # SPIKE 012: pin same-prompt_cache_key requests to a dedicated upstream
-            # connection pool (read in lease_http_session) so the per-connection
-            # prefix cache stays warm. No-op unless the feature flag is enabled.
-            affinity_key = proxy_affinity_module._prompt_cache_key_from_request_model(responses_payload)
-            if affinity_key:
-                affinity_cache_key_var.set(affinity_key)
         response = await _collect_responses(
             request,
             responses_payload,
