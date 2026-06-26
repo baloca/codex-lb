@@ -330,6 +330,10 @@ class Settings(BaseSettings):
     cached_route_connection_affinity_enabled: bool = False
     cached_route_connection_affinity_pool_size: int = 6
     cached_route_connection_affinity_ttl_seconds: int = 1800
+    # Keep dedicated-pool sockets alive across the prewarm→formatter gap (default
+    # aiohttp keepalive is 15s, which closes prewarm-warmed connections before the
+    # formatter fan-out runs ~2-3min later → cold → 0% cache). Set >= run duration.
+    cached_route_connection_affinity_keepalive_seconds: int = 600
 
     @field_validator("data_dir", mode="before")
     @classmethod
