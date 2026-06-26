@@ -91,15 +91,9 @@ async def _get_affinity_session(cache_key: str) -> aiohttp.ClientSession | None:
         for stale_key in [k for k, e in _affinity_sessions.items() if now - e.last_used > ttl]:
             stale = _affinity_sessions.pop(stale_key)
             asyncio.create_task(_safe_close_session(stale.session))
-        keepalive = float(getattr(settings, "cached_route_connection_affinity_keepalive_seconds", 600))
         entry = _affinity_sessions.get(cache_key)
         if entry is None or entry.session.closed:
-            connector = aiohttp.TCPConnector(
-                limit=pool,
-                limit_per_host=pool,
-                ssl=_build_ssl_context(),
-                keepalive_timeout=keepalive,
-            )
+            connector = aiohttp.TCPConnector(limit=pool, limit_per_host=pool, ssl=_build_ssl_context())
             session = aiohttp.ClientSession(
                 connector=connector,
                 timeout=aiohttp.ClientTimeout(total=None),
