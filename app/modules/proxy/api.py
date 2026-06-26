@@ -150,6 +150,7 @@ logger = logging.getLogger(__name__)
 _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     {
         "message",
+        "compaction",
         "function_call",
         "function_call_output",
         "reasoning",
@@ -1814,23 +1815,30 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=CodexModelsResponse(models=[]).model_dump(mode="json"))
+        return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
+    data: list[ModelListItem] = []
     for slug, model in models.items():
+        if not model.supported_in_api:
+            continue
         if visibility_allowed_models is None:
             if not is_public_model(model, allowed_models):
                 continue
-            entries.append(_to_codex_model_entry(model))
+            entry = _to_codex_model_entry(model)
+            entries.append(entry)
+            if entry.visibility == "list":
+                data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
             continue
-        entries.append(
-            _to_codex_model_entry(
-                model,
-                visibility="list" if slug in visibility_allowed_models else "hide",
-            )
+        entry = _to_codex_model_entry(
+            model,
+            visibility="list" if slug in visibility_allowed_models else "hide",
         )
+        entries.append(entry)
+        if entry.visibility == "list":
+            data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     await _release_reservation(reservation)
-    return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
+    return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
@@ -1848,36 +1856,27 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=ModelListResponse(data=[]).model_dump(mode="json"))
+        return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
-        items.append(
-            ModelListItem.model_validate(
-                {
-                    "id": slug,
-                    "created": created,
-                    "owned_by": "codex-lb",
-                    "metadata": _to_model_metadata(model),
-                    "api_types": ["chat_completions"],
-                    "capabilities": _v1_model_capabilities(model),
-                    "context_length": _v1_input_context_window(model),
-                    "contextLength": _v1_input_context_window(model),
-                    "max_output_tokens": _v1_max_output_tokens(model),
-                    "maxOutputTokens": _v1_max_output_tokens(model),
-                    "supports_reasoning": _v1_supports_reasoning(model),
-                    "supportsReasoning": _v1_supports_reasoning(model),
-                    "supports_images": _v1_supports_vision(model),
-                    "supportsImages": _v1_supports_vision(model),
-                    "supports_vision": _v1_supports_vision(model),
-                    "supportsVision": _v1_supports_vision(model),
-                }
-            )
-        )
+        items.append(_to_model_list_item(slug, model, created=created))
     await _release_reservation(reservation)
-    return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
+    return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
+
+
+def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
+    payload = response.model_dump(mode="json")
+    for item in payload["data"]:
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("additional_speed_tiers", "service_tiers", "default_service_tier"):
+            if metadata.get(key) is None:
+                metadata.pop(key, None)
+    return payload
 
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -1894,6 +1893,39 @@ def _canonical_model_set(models: Iterable[str]) -> set[str]:
 
 def _canonical_model_slug(model: str) -> str:
     return resolve_model_alias(model) or model
+
+
+def _to_model_list_item(slug: str, model: UpstreamModel, *, created: int) -> ModelListItem:
+    return ModelListItem.model_validate(
+        {
+            "id": slug,
+            "created": created,
+            "owned_by": "codex-lb",
+            "metadata": _to_model_metadata(model),
+            "api_types": ["chat_completions"],
+            "capabilities": _v1_model_capabilities(model),
+            "context_length": _v1_input_context_window(model),
+            "contextLength": _v1_input_context_window(model),
+            "max_output_tokens": _v1_max_output_tokens(model),
+            "maxOutputTokens": _v1_max_output_tokens(model),
+            "supports_reasoning": _v1_supports_reasoning(model),
+            "supportsReasoning": _v1_supports_reasoning(model),
+            "supports_images": _v1_supports_vision(model),
+            "supportsImages": _v1_supports_vision(model),
+            "supports_vision": _v1_supports_vision(model),
+            "supportsVision": _v1_supports_vision(model),
+        }
+    )
+
+
+def _model_list_created_at(model: UpstreamModel) -> int:
+    for key in ("created", "created_at", "createdAt"):
+        raw_value = model.raw.get(key)
+        if isinstance(raw_value, int):
+            return raw_value
+        if isinstance(raw_value, float):
+            return int(raw_value)
+    return 0
 
 
 def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:
@@ -2028,7 +2060,29 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
         supported_in_api=model.supported_in_api,
         minimal_client_version=model.minimal_client_version,
         priority=model.priority,
+        additional_speed_tiers=_raw_string_list(model.raw, "additional_speed_tiers"),
+        service_tiers=_raw_object_list(model.raw, "service_tiers"),
+        default_service_tier=_raw_optional_string(model.raw, "default_service_tier"),
     )
+
+
+def _raw_string_list(raw: Mapping[str, JsonValue], key: str) -> list[str] | None:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return None
+    return [item for item in value if isinstance(item, str)]
+
+
+def _raw_object_list(raw: Mapping[str, JsonValue], key: str) -> list[dict[str, JsonValue]] | None:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return None
+    return [dict(cast(Mapping[str, JsonValue], item)) for item in value if isinstance(item, Mapping)]
+
+
+def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:
+    value = raw.get(key)
+    return value if isinstance(value, str) else None
 
 
 @v1_router.post(
@@ -2326,6 +2380,7 @@ async def _stream_responses(
             forwarded_affinity_key=forwarded_affinity_key,
             account_selection_lease_kind=account_selection_lease_kind,
             wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     else:
         stream = context.service.stream_responses(
@@ -2339,10 +2394,11 @@ async def _stream_responses(
             suppress_text_done_events=suppress_text_done_events,
             account_selection_lease_kind=account_selection_lease_kind,
             wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     stream, startup_error = await _probe_stream_startup_error(
         stream,
-        convert_event_errors=bridge_active,
+        convert_event_errors=bridge_active and enforce_openai_sdk_contract,
         timeout_seconds=(
             _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
         ),
@@ -2585,10 +2641,25 @@ async def _compact_responses(
         )
     finally:
         await _release_reservation(reservation)
+    result_payload = result.model_dump(mode="json", exclude_none=True)
+    if codex_session_affinity:
+        result_payload = _normalize_codex_remote_compaction_v2_result(result, result_payload)
     return JSONResponse(
-        content=result.model_dump(mode="json", exclude_none=True),
+        content=result_payload,
         headers=rate_limit_headers,
     )
+
+
+def _normalize_codex_remote_compaction_v2_result(
+    payload: CompactResponsePayload,
+    result_payload: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    compaction_item = _compact_response_output_item(payload)
+    if compaction_item is None:
+        return result_payload
+    normalized = dict(result_payload)
+    normalized["output"] = [compaction_item]
+    return normalized
 
 
 def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, JsonValue] | None:
@@ -2736,6 +2807,31 @@ async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
     return await anext(stream)
 
 
+def _retrieve_first_stream_task_exception(task: asyncio.Task[str]) -> None:
+    # Retrieve a finished probe task's exception so an abandoned task does not
+    # surface asyncio's "exception was never retrieved" warning. Consumers that
+    # await the task still re-raise it.
+    if not task.cancelled():
+        task.exception()
+
+
+def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[str]:
+    """Create the first-stream-item probe task.
+
+    ``_probe_stream_startup_error`` / ``_probe_chat_stream_startup_error`` race
+    this task against a timeout. On timeout the task keeps running and is handed
+    to the streamed response for consumption. If the wrapping stream is dropped
+    before the task is awaited -- for example the request is torn down while the
+    upstream is still blocked on the response-create admission gate -- the task
+    would otherwise finish with an unretrieved ``ProxyResponseError`` and asyncio
+    would log it. The done-callback retrieves the result in that abandoned case
+    without hiding the error from consumers that do await the task.
+    """
+    task = asyncio.create_task(_read_first_stream_item(stream))
+    task.add_done_callback(_retrieve_first_stream_task_exception)
+    return task
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
@@ -2744,14 +2840,17 @@ async def _probe_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
-    first_task = asyncio.create_task(_read_first_stream_item(stream))
-    try:
-        first = await asyncio.wait_for(
-            asyncio.shield(first_task),
-            timeout=timeout_seconds,
-        )
-    except TimeoutError:
+    first_task = _create_first_stream_probe_task(stream)
+    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+    if not done:
+        # Probe window elapsed before the first item arrived. Hand the still-
+        # running task off to be consumed by the streamed response. asyncio.wait
+        # (rather than wait_for + shield) never cancels the task on timeout,
+        # avoiding the Python 3.14 "exception in shielded future" log when the
+        # upstream later returns an error such as a 429 from the admission gate.
         return _prepend_first_task(first_task, stream), None
+    try:
+        first = first_task.result()
     except StopAsyncIteration:
         return _prepend_first(None, stream), None
     except ProxyResponseError as exc:
@@ -3056,14 +3155,12 @@ async def _probe_chat_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
-        first_task = asyncio.create_task(_read_first_stream_item(stream))
-        try:
-            first = await asyncio.wait_for(
-                asyncio.shield(first_task),
-                timeout=timeout_seconds,
-            )
-        except TimeoutError:
+        first_task = _create_first_stream_probe_task(stream)
+        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+        if not done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
+        try:
+            first = first_task.result()
         except StopAsyncIteration:
             return _prepend_items(buffered, _prepend_first(None, stream)), None
         except ProxyResponseError as exc:
@@ -3094,9 +3191,16 @@ async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncI
 
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
-        yield await first_task
+        first = await first_task
     except StopAsyncIteration:
         return
+    finally:
+        # If the wrapping stream is closed before the first item is consumed
+        # (client disconnect, request teardown), cancel the still-running probe
+        # task so it does not hold the upstream connection open.
+        if not first_task.done():
+            first_task.cancel()
+    yield first
     async for line in stream:
         yield line
 
@@ -3669,6 +3773,12 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
+        if not enforce_openai_sdk_contract and (
+            event_type == "error" or is_json_mapping(normalized_payload.get("error"))
+        ):
+            terminal_seen = True
+            yield event_block
+            continue
 
         if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
             if event_type == "response.created":
@@ -3707,6 +3817,14 @@ async def _normalize_public_responses_stream(
                     yield formatted_payload
                 return
 
+        if enforce_openai_sdk_contract and event_type == "error":
+            for formatted_payload in _public_response_failed_event_blocks_from_error(
+                normalized_payload,
+                include_created=not created_emitted,
+            ):
+                yield formatted_payload
+            return
+
         _collect_output_item_event(normalized_payload, output_items)
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
@@ -3718,7 +3836,9 @@ async def _normalize_public_responses_stream(
         if not done_seen and not enforce_openai_sdk_contract:
             yield "data: [DONE]\n\n"
         return
-    error_kind = contract_violation_kind or "upstream_stream_truncated"
+    error_kind = contract_violation_kind or (
+        "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"
+    )
     include_created = enforce_openai_sdk_contract and not created_emitted
     for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
         yield formatted_payload
@@ -3760,12 +3880,22 @@ def _public_response_failed_event_blocks_from_error(
     if error is None:
         error = _default_error_envelope().error
     assert error is not None
+    message = error.message
+    raw_message = payload.get("message")
+    if isinstance(raw_message, str) and raw_message.strip():
+        if not message or message == "Upstream error":
+            message = raw_message.strip()
+    error_type = error.type
+    if not error_type:
+        raw_error_type = payload.get("error_type")
+        if isinstance(raw_error_type, str) and raw_error_type.strip():
+            error_type = raw_error_type.strip()
     failed_payload = cast(
         dict[str, JsonValue],
         response_failed_event(
             error.code or "upstream_error",
-            error.message or "Upstream error",
-            error.type or "server_error",
+            message or "Upstream error",
+            error_type or "server_error",
             response_id=f"resp_{error.code or 'upstream_error'}",
             error_param=error.param,
         ),
@@ -4258,6 +4388,8 @@ def _public_contract_error_message(kind: str) -> str:
         return "Responses stream produced unsupported output items"
     if kind == "upstream_stream_truncated":
         return "Responses stream ended before a terminal event"
+    if kind == "stream_incomplete":
+        return "Upstream stream ended before response.completed"
     return "Responses stream violated the public contract"
 
 

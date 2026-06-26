@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -108,32 +109,102 @@ async def test_quota_planner_decisions_api_returns_recent_decisions(async_client
 
 
 @pytest.mark.asyncio
-async def test_quota_planner_repository_normalizes_aware_decision_timestamps(db_setup):
+async def test_quota_planner_repository_persists_naive_utc_decision_datetimes(monkeypatch, db_setup):
     del db_setup
-    scheduled_at = datetime(2026, 6, 11, 8, 30, tzinfo=timezone.utc)
-    executed_at = datetime(2026, 6, 11, 8, 45, tzinfo=timezone.utc)
+    aware_scheduled = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    aware_executed = datetime(2026, 5, 18, 13, 30, tzinfo=timezone.utc)
 
+    # SQLite's aiosqlite driver silently strips tzinfo on read, so we inspect the
+    # exact values the repository binds to the timezone-naive columns. asyncpg/Postgres
+    # raises "can't subtract offset-naive and offset-aware datetimes" if these are aware,
+    # so the repository MUST sanitize them before persistence.
+    bound_scheduled: list[object] = []
+    original_add = AsyncSession.add
+
+    def capture_add(self, instance, *args, **kwargs):
+        if isinstance(instance, QuotaPlannerDecision):
+            bound_scheduled.append(instance.scheduled_at)
+        return original_add(self, instance, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "add", capture_add)
+
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        decision = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key="aware-datetime-persistence",
+            account_id=None,
+            scheduled_at=aware_scheduled,
+            score=1.0,
+            reason="aware",
+            status="planned",
+        )
+
+    assert bound_scheduled, "log_decision should construct a decision row"
+    bound_value = bound_scheduled[-1]
+    assert isinstance(bound_value, datetime)
+    # Guards the Postgres path: timezone-naive columns must not receive aware datetimes.
+    assert bound_value.tzinfo is None
+    # The absolute instant must be preserved (converted to UTC).
+    assert bound_value == aware_scheduled.replace(tzinfo=None)
+
+    monkeypatch.undo()
+
+    # update_decision_status binds executed_at via an UPDATE ... values() statement.
+    # Capture the bound value from the compiled statement parameters.
+    bound_executed: list[object] = []
+    original_scalar = AsyncSession.scalar
+
+    async def capture_scalar(self, statement, *args, **kwargs):
+        values = getattr(statement, "_values", None)
+        if values:
+            for col, bind in values.items():
+                if getattr(col, "name", None) == "executed_at":
+                    bound_executed.append(getattr(bind, "value", bind))
+        return await original_scalar(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "scalar", capture_scalar)
+
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        updated = await repo.update_decision_status(
+            decision.id,
+            status="executed",
+            executed_at=aware_executed,
+        )
+        assert updated is not None
+
+    assert bound_executed, "update_decision_status should bind executed_at"
+    update_value = bound_executed[-1]
+    assert isinstance(update_value, datetime)
+    assert update_value.tzinfo is None
+    assert update_value == aware_executed.replace(tzinfo=None)
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_repository_preserves_naive_decision_datetimes(db_setup):
+    del db_setup
+    naive_scheduled = datetime(2026, 5, 18, 9, 0)
     async with SessionLocal() as session:
         repo = QuotaPlannerRepository(session)
         decision = await repo.log_decision(
             mode="shadow",
             action="reserve",
-            idempotency_key="aware-decision-timestamps",
-            scheduled_at=scheduled_at,
-            executed_at=executed_at,
+            idempotency_key="naive-datetime-persistence",
+            account_id=None,
+            scheduled_at=naive_scheduled,
+            score=1.0,
+            reason="naive",
             status="skipped",
         )
-        assert decision.scheduled_at == scheduled_at.replace(tzinfo=None)
-        assert decision.executed_at == executed_at.replace(tzinfo=None)
 
-        updated = await repo.update_decision_status(
-            decision.id,
-            status="executed",
-            executed_at=scheduled_at,
-        )
-
-    assert updated is not None
-    assert updated.executed_at == scheduled_at.replace(tzinfo=None)
+    async with SessionLocal() as session:
+        stored = await session.get(QuotaPlannerDecision, decision.id)
+        assert stored is not None
+        assert stored.scheduled_at is not None
+        assert stored.scheduled_at == naive_scheduled
+        assert stored.scheduled_at.tzinfo is None
 
 
 @pytest.mark.asyncio
