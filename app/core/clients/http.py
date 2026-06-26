@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import ssl
+import time
 from collections.abc import AsyncIterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import TracebackType
 
@@ -45,6 +48,69 @@ _http_client: _ManagedHttpClient | None = None
 _http_client_lock = asyncio.Lock()
 _retired_http_clients: list[_ManagedHttpClient] = []
 _closing_http_clients: list[_ManagedHttpClient] = []
+
+
+# SPIKE 012: per-prompt_cache_key upstream-HTTP connection affinity.
+# Set by the cached-route handler; read in lease_http_session so requests sharing
+# a prompt_cache_key reuse a small dedicated connection pool (warm prefix cache)
+# instead of scattering across the 50-wide shared connector.
+affinity_cache_key_var: ContextVar[str | None] = ContextVar("affinity_cache_key", default=None)
+
+
+@dataclass(slots=True)
+class _AffinitySession:
+    session: aiohttp.ClientSession
+    last_used: float
+
+
+_affinity_sessions: dict[str, _AffinitySession] = {}
+_affinity_lock = asyncio.Lock()
+
+
+async def _safe_close_session(session: aiohttp.ClientSession) -> None:
+    with contextlib.suppress(Exception):
+        await session.close()
+
+
+async def _get_affinity_session(cache_key: str) -> aiohttp.ClientSession | None:
+    """Return (creating on demand) the dedicated connection pool for ``cache_key``.
+
+    Returns ``None`` when a SOCKS proxy is configured so we never bypass it; the
+    caller then falls back to the shared client.
+    """
+    settings = get_settings()
+    proxy_env = (
+        settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
+    )
+    if _socks_proxy_config(proxy_env):
+        return None
+    pool = max(1, int(getattr(settings, "cached_route_connection_affinity_pool_size", 6)))
+    ttl = float(getattr(settings, "cached_route_connection_affinity_ttl_seconds", 1800))
+    now = time.monotonic()
+    async with _affinity_lock:
+        for stale_key in [k for k, e in _affinity_sessions.items() if now - e.last_used > ttl]:
+            stale = _affinity_sessions.pop(stale_key)
+            asyncio.create_task(_safe_close_session(stale.session))
+        entry = _affinity_sessions.get(cache_key)
+        if entry is None or entry.session.closed:
+            connector = aiohttp.TCPConnector(limit=pool, limit_per_host=pool, ssl=_build_ssl_context())
+            session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=None),
+                trust_env=True,
+            )
+            entry = _AffinitySession(session=session, last_used=now)
+            _affinity_sessions[cache_key] = entry
+        entry.last_used = now
+        return entry.session
+
+
+async def _close_affinity_sessions() -> None:
+    async with _affinity_lock:
+        entries = list(_affinity_sessions.values())
+        _affinity_sessions.clear()
+    for entry in entries:
+        await _safe_close_session(entry.session)
 
 
 def _socks_proxy_config(environ: Mapping[str, str | None] = os.environ) -> _SocksProxyConfig | None:
@@ -252,6 +318,17 @@ async def lease_http_session(
     if session is not None:
         yield session
         return
+    cache_key = affinity_cache_key_var.get()
+    if cache_key and get_settings().cached_route_connection_affinity_enabled:
+        affinity_session = await _get_affinity_session(cache_key)
+        if affinity_session is not None:
+            logger.info(
+                "cached_route_affinity_session_used cache_key_hash=%s pool=%d",
+                hashlib.sha256(cache_key.encode()).hexdigest()[:8],
+                get_settings().cached_route_connection_affinity_pool_size,
+            )
+            yield affinity_session
+            return
     async with lease_http_client() as client:
         yield client.session
 
@@ -291,6 +368,7 @@ async def refresh_http_client() -> HttpClient:
 
 async def close_http_client() -> None:
     global _http_client
+    await _close_affinity_sessions()
     async with _http_client_lock:
         client = _http_client
         _http_client = None
