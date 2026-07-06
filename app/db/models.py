@@ -176,7 +176,10 @@ class AdditionalUsageHistory(Base):
 
 class RequestLog(Base):
     __tablename__ = "request_logs"
-    __table_args__ = (Index("idx_logs_useragent_group", "useragent_group"),)
+    __table_args__ = (
+        Index("idx_logs_useragent_group", "useragent_group"),
+        Index("idx_logs_client_ip", "client_ip"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(
@@ -187,6 +190,7 @@ class RequestLog(Base):
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
+    archive_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_kind: Mapped[str] = mapped_column(
         String,
         default=RequestKind.NORMAL.value,
@@ -200,6 +204,7 @@ class RequestLog(Base):
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     useragent: Mapped[str | None] = mapped_column(Text, nullable=True)
     useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -494,6 +499,12 @@ class DashboardSettings(Base):
         default=False,
         nullable=False,
     )
+    hide_upstream_quota_from_api_keys: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: Mapped[int] = mapped_column(
@@ -573,6 +584,12 @@ class DashboardSettings(Base):
         server_default=text("3600"),
         nullable=False,
     )
+    limit_warmup_exhausted_threshold_percent: Mapped[float] = mapped_column(
+        Float,
+        default=99.0,
+        server_default=text("99.0"),
+        nullable=False,
+    )
     limit_warmup_min_available_percent: Mapped[float] = mapped_column(
         Float,
         default=100.0,
@@ -582,6 +599,18 @@ class DashboardSettings(Base):
         String,
         default="0,1,2,3,4,5,6",
         server_default=text("'0,1,2,3,4,5,6'"),
+        nullable=False,
+    )
+    weekly_pace_smoothing_minutes: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+        server_default=text("30"),
+        nullable=False,
+    )
+    limit_warmup_staggered_idle_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
         nullable=False,
     )
     warmup_model: Mapped[str] = mapped_column(
@@ -641,6 +670,12 @@ class ApiKey(Base):
         default=False,
         server_default=false(),
         nullable=False,
+    )
+    usage_sections: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=False,
+        default="upstream_limits,account_pool_usage",
+        server_default="upstream_limits,account_pool_usage",
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -1058,6 +1093,21 @@ Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_account_kind_deleted_latest",
+    RequestLog.account_id,
+    RequestLog.request_kind,
+    RequestLog.deleted_at,
+    RequestLog.requested_at,
+    RequestLog.id,
+)
+Index(
+    "idx_logs_account_request_latest",
+    RequestLog.account_id,
+    RequestLog.request_id,
+    RequestLog.requested_at,
+    RequestLog.id,
+)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -1181,4 +1231,13 @@ Index(
     AdditionalUsageHistory.window,
     AdditionalUsageHistory.account_id,
     AdditionalUsageHistory.recorded_at,
+)
+Index(
+    "ix_additional_usage_quota_window_latest",
+    AdditionalUsageHistory.quota_key,
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at.desc(),
+    AdditionalUsageHistory.used_percent.desc(),
+    AdditionalUsageHistory.id.desc(),
 )
