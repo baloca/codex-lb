@@ -1254,7 +1254,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warning: {warning}", file=sys.stderr, flush=True)
         numbers = list_open_pr_numbers(repo) if args.all_open else list(args.pr or [])
         if not numbers:
-            print(f"{repo}: no PRs selected; pass --pr or --all-open", file=sys.stderr)
+            if args.all_open:
+                print(f"{repo}: no open PRs; nothing to sync", flush=True)
+                continue
+            print(f"{repo}: no PRs selected; pass --pr or --all-open", file=sys.stderr, flush=True)
             had_error = True
             continue
 

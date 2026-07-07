@@ -250,6 +250,23 @@ def test_main_tolerates_read_errors_when_requested(
     assert "dry-run Soju06/codex-lb#714" in captured.out
 
 
+def test_main_all_open_no_prs_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(module, "ensure_label", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "list_open_pr_numbers", lambda _repo: [])
+
+    result = module.main(["--repo", "Soju06/codex-lb", "--all-open", "--tolerate-read-errors"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Soju06/codex-lb: no open PRs; nothing to sync" in captured.out
+    assert captured.err == ""
+
+
 def test_main_fails_tolerant_run_when_every_pr_read_fails(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
