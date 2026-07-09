@@ -419,6 +419,38 @@ def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_outp
     )
 
 
+@pytest.mark.parametrize("error_code", ["overloaded_error", "server_is_overloaded"])
+def test_websocket_precreated_retry_error_code_replays_upstream_overload(error_code: str):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_overloaded_precreated",
+        model="gpt-5.6-terra",
+        service_tier=None,
+        reasoning_effort="medium",
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"hello"}',
+    )
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "error": {
+            "type": "service_unavailable_error",
+            "code": error_code,
+            "message": "Our servers are currently overloaded. Please try again later.",
+        },
+    }
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        == error_code
+    )
+
+
 def test_websocket_precreated_retry_error_code_does_not_replay_after_response_event():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_visible_precreated",
@@ -650,6 +682,11 @@ def test_upstream_unavailable_certificate_connect_error_is_not_transient_retry()
         )
         is False
     )
+
+
+@pytest.mark.parametrize("error_code", ["overloaded_error", "server_is_overloaded"])
+def test_upstream_overload_is_transient_same_account_retry(error_code: str) -> None:
+    assert proxy_service._should_retry_transient_stream_error(error_code, "overloaded") is True
 
 
 def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():

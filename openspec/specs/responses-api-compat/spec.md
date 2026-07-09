@@ -169,7 +169,13 @@ When serving streaming `POST /v1/responses`, the first OpenAI-contract event the
 
 ### Requirement: Upstream overload envelopes are classified as retryable transient failures
 
-When `classify_upstream_failure` observes an upstream error envelope whose `code` is `overloaded_error`, the system MUST treat it as `retryable_transient` regardless of the accompanying HTTP status. Streamed Responses API traffic can deliver the overload envelope on a connection that has already returned HTTP 200, so a 5xx-only heuristic is insufficient to drive account fail-over and bounded retry.
+When `classify_upstream_failure` observes an upstream error envelope whose `code` is `overloaded_error` or `server_is_overloaded`, the system MUST treat it as `retryable_transient` regardless of the accompanying HTTP status. Streamed Responses API traffic can deliver the overload envelope on a connection that has already returned HTTP 200, so a 5xx-only heuristic is insufficient to drive account fail-over and bounded retry.
+
+Direct upstream requests MUST use the existing bounded same-account transient
+retry while no downstream output is visible. Pre-created WebSocket/HTTP-bridge
+requests MUST use the existing single transparent replay only before response
+creation, with no other pending request and no visible downstream output. The
+proxy MUST NOT substitute another model or replay after visible output.
 
 #### Scenario: `overloaded_error` without a 5xx status is retryable transient
 
@@ -182,6 +188,18 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **WHEN** `classify_upstream_failure` is called with `error_code="overloaded_error"` and `http_status` is 500, 502, 503, or 504
 - **THEN** the returned `failure_class` is `retryable_transient`
 - **AND** the result is the same as the no-status path, so the 5xx fallback heuristic is not the only signal driving the decision
+
+#### Scenario: `server_is_overloaded` before response creation is retried safely
+
+- **WHEN** upstream emits `server_is_overloaded` before response creation
+- **AND** the request satisfies the existing retry-safety checks
+- **THEN** the proxy uses its bounded same-account retry or single pre-created transparent replay
+- **AND** the first transient failure is not surfaced to the client
+
+#### Scenario: Overload after visible output is not replayed
+
+- **WHEN** either overload code arrives after downstream output is visible
+- **THEN** the proxy does not replay the request
 
 ### Requirement: Strict function tool parameter schemas are pre-validated
 
