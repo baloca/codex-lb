@@ -569,16 +569,10 @@ def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
 
 def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
     """Rewrite a non-native request's outbound fingerprint to the Codex CLI
-    persona in place: set the canonical ``User-Agent``, ``originator``, and
-    ``version`` headers, and strip SDK-only ``x-openai-client-*`` and
-    ``x-stainless-*`` headers.
-
-    OpenAI's Codex client installs ``originator=codex_cli_rs`` as a default
-    client header and adds its package version as the provider ``version``
-    header.  Both are part of the upstream model-availability contract; a
-    Codex-looking User-Agent alone is insufficient for models such as
-    ``gpt-5.6-luna``.
-    """
+    persona in place: set ``User-Agent`` to a ``codex_cli_rs`` string, strip
+    SDK-only ``x-openai-client-*`` and ``x-stainless-*`` headers, and strip any
+    inbound ``originator`` header (the real Codex CLI omits it for the default
+    originator and lets the backend read it from the User-Agent prefix)."""
     version = get_codex_version_cache().cached_version_or_default()
     codex_user_agent = build_codex_user_agent(version)
     for key in list(headers.keys()):
@@ -588,12 +582,9 @@ def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
             or lowered in _SDK_FINGERPRINT_HEADER_KEYS
             or lowered.startswith(_SDK_FINGERPRINT_HEADER_PREFIXES)
             or lowered == "originator"
-            or lowered == "version"
         ):
             del headers[key]
     headers["User-Agent"] = codex_user_agent
-    headers["originator"] = _CODEX_CLI_ORIGINATOR
-    headers["version"] = version
 
 
 def _build_upstream_headers(

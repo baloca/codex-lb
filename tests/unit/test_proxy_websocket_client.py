@@ -1057,8 +1057,7 @@ def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
     lowered = {key.lower() for key in headers}
     assert "x-openai-client-version" not in lowered
     assert not any(key.lower().startswith("x-stainless-") for key in headers)
-    assert headers["originator"] == "codex_cli_rs"
-    assert headers["version"] == "0.142.0"
+    assert "originator" not in lowered
     assert headers["ChatGPT-Account-Id"] == "acct-1"
     assert "chatgpt-account-id" not in headers
     # The responses websocket beta header is still appended.
