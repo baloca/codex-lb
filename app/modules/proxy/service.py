@@ -797,8 +797,6 @@ _TRANSIENT_RETRY_CODES = frozenset(
         "stream_incomplete",
         "stream_idle_timeout",
         "upstream_request_timeout",
-        "overloaded_error",
-        "server_is_overloaded",
     }
 )
 _UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS = (
@@ -831,8 +829,6 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "insufficient_quota",
         "usage_not_included",
         "quota_exceeded",
-        "overloaded_error",
-        "server_is_overloaded",
     }
 )
 _WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication", "token_invalidated"})
