@@ -12,6 +12,9 @@ from app.core.types import JsonValue
 
 logger = logging.getLogger(__name__)
 
+MODEL_SOURCE_KIND_SUBSCRIPTION = "subscription"
+MODEL_SOURCE_KIND_OPENAI_COMPATIBLE = "openai_compatible"
+
 
 @dataclass(frozen=True)
 class ReasoningLevel:
@@ -38,6 +41,8 @@ class UpstreamModel:
     priority: int
     available_in_plans: frozenset[str]
     base_instructions: str = ""
+    source_kind: str = MODEL_SOURCE_KIND_SUBSCRIPTION
+    source_id: str | None = None
     raw: dict[str, JsonValue] = field(default_factory=dict, hash=False, compare=False)
 
 
@@ -360,10 +365,13 @@ class ModelRegistry:
 
     def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
         normalized_slug = slug.strip().lower()
+        bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
         if self._snapshot is None:
-            model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
-            return model.available_in_plans if model is not None else None
-        return self._snapshot.model_plans.get(slug) or self._snapshot.model_plans.get(normalized_slug, frozenset())
+            return bootstrap_model.available_in_plans if bootstrap_model is not None else None
+        snapshot_plans = self._snapshot.model_plans.get(slug) or self._snapshot.model_plans.get(
+            normalized_slug, frozenset()
+        )
+        return snapshot_plans
 
     def plan_types_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
         if service_tier is None:
