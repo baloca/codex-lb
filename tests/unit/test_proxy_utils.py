@@ -2241,6 +2241,42 @@ def test_response_create_client_metadata_preserves_existing_json_values_and_turn
     }
 
 
+def test_response_create_client_metadata_promotes_multi_agent_headers_per_request():
+    metadata = proxy_service._response_create_client_metadata(
+        {
+            "client_metadata": {
+                "x-openai-subagent": "payload-subagent",
+            }
+        },
+        headers={
+            "X-OpenAI-Subagent": "header-subagent",
+            "X-Codex-Parent-Thread-Id": "parent-thread",
+            "X-Codex-Window-Id": "child-thread:0",
+            "X-Codex-Turn-Metadata": '{"turn_id":"turn-1"}',
+        },
+    )
+
+    assert metadata == {
+        "x-openai-subagent": "payload-subagent",
+        "x-codex-parent-thread-id": "parent-thread",
+        "x-codex-window-id": "child-thread:0",
+        "x-codex-turn-metadata": '{"turn_id":"turn-1"}',
+    }
+
+
+def test_response_create_client_metadata_ignores_blank_multi_agent_headers():
+    metadata = proxy_service._response_create_client_metadata(
+        {},
+        headers={
+            "x-openai-subagent": " ",
+            "x-codex-parent-thread-id": "",
+            "x-codex-window-id": "\t",
+        },
+    )
+
+    assert metadata is None
+
+
 def test_response_create_client_metadata_reconstructs_responses_lite_marker():
     marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
     metadata = proxy_service._response_create_client_metadata(
@@ -3992,6 +4028,48 @@ def test_log_proxy_request_shape_includes_affinity_metadata(monkeypatch, caplog)
     assert "prompt_cache_key_set=True" in caplog.text
     assert "session_header_present=True" in caplog.text
     assert "tools_hash=sha256:" in caplog.text
+
+
+def test_tools_hash_is_insensitive_to_tool_and_key_order():
+    # Wire payloads forward client tool entries byte-preserved (issue #1184),
+    # so the affinity/observability hash must canonicalize locally: tool array
+    # order and object key order must not change the hash (change #228).
+    base = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+    }
+    payload_one = ResponsesRequest.model_validate(
+        {
+            **base,
+            "tools": [
+                {"type": "function", "name": "b_tool", "parameters": {"type": "object", "properties": {}}},
+                {"type": "function", "name": "a_tool"},
+            ],
+        }
+    )
+    payload_two = ResponsesRequest.model_validate(
+        {
+            **base,
+            "tools": [
+                {"name": "a_tool", "type": "function"},
+                {"parameters": {"properties": {}, "type": "object"}, "name": "b_tool", "type": "function"},
+            ],
+        }
+    )
+    payload_other = ResponsesRequest.model_validate(
+        {
+            **base,
+            "tools": [{"type": "function", "name": "c_tool"}],
+        }
+    )
+
+    hash_one = proxy_service._tools_hash(payload_one)
+    hash_two = proxy_service._tools_hash(payload_two)
+
+    assert hash_one is not None
+    assert hash_one == hash_two
+    assert hash_one != proxy_service._tools_hash(payload_other)
 
 
 def test_log_proxy_request_shape_hashes_prompt_cache_key_without_raw_value(monkeypatch, caplog):
@@ -7144,6 +7222,37 @@ def test_sticky_key_for_compact_request_prefers_codex_session_affinity():
     )
 
     assert policy.key == "codex-session-1"
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert policy.reallocate_sticky is False
+    assert policy.max_age_seconds is None
+
+
+@pytest.mark.parametrize("codex_session_affinity", [False, True])
+def test_sticky_key_for_compact_request_prefers_turn_state_over_session_and_cache(
+    codex_session_affinity: bool,
+):
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "prompt_cache_key": "cache-owner",
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_compact_request(
+        payload,
+        headers={
+            "x-codex-turn-state": "turn-owner",
+            "session_id": "session-owner",
+        },
+        codex_session_affinity=codex_session_affinity,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    assert policy.key == "turn-owner"
     assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
     assert policy.reallocate_sticky is False
     assert policy.max_age_seconds is None
