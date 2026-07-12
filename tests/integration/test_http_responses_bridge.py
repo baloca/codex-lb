@@ -5987,10 +5987,12 @@ async def test_v1_responses_http_bridge_sdk_retry_rebinds_after_stream_idle_time
     _install_bridge_settings_with_limits(
         monkeypatch,
         enabled=True,
-        sse_keepalive_interval_seconds=0.001,
-        stream_idle_timeout_seconds=0.003,
+        sse_keepalive_interval_seconds=0.01,
+        stream_idle_timeout_seconds=0.05,
     )
-    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    # Keep the forced idle timeout fast without making successful startup
+    # depend on sub-millisecond CI scheduler timing.
+    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 2)
 
     account_id = await _import_account(
@@ -6135,10 +6137,12 @@ async def test_v1_responses_http_bridge_eva_style_recovery_succeeds_after_stream
     _install_bridge_settings_with_limits(
         monkeypatch,
         enabled=True,
-        sse_keepalive_interval_seconds=0.001,
-        stream_idle_timeout_seconds=0.003,
+        sse_keepalive_interval_seconds=0.01,
+        stream_idle_timeout_seconds=0.05,
     )
-    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    # Keep the forced idle timeout fast without making successful startup
+    # depend on sub-millisecond CI scheduler timing.
+    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 2)
 
     account_id = await _import_account(
