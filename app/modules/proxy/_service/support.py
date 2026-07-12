@@ -7,6 +7,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -36,12 +37,57 @@ _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
-_HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset({"turn_state_header", "session_header"})
+_HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
+    {"turn_state_header", "session_header", "internal_unanchored_parallel", "internal_model_parallel"}
+)
 _ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS = 1.0
 _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
+_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_wait",
+    default=None,
+)
+_PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_ready",
+    default=None,
+)
+
+
+def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_WAIT.set(event)
+
+
+def _reset_propagated_capacity_startup_wait(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_WAIT.reset(token)
+
+
+def _bind_propagated_capacity_startup_ready(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_READY.set(event)
+
+
+def _reset_propagated_capacity_startup_ready(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_READY.reset(token)
+
+
+def _signal_propagated_capacity_startup_wait() -> None:
+    ready_event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if ready_event is not None:
+        ready_event.clear()
+    event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if event is not None:
+        event.set()
+
+
+def _signal_propagated_capacity_startup_ready() -> None:
+    wait_event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if wait_event is not None:
+        wait_event.clear()
+    event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if event is not None:
+        event.set()
 
 
 def _account_selection_recovery_sleep_seconds_from_message(
@@ -80,6 +126,9 @@ def _account_selection_recovery_sleep_seconds_from_message(
         )
 
     if "hit your spend cap set by the owner of your workspace" in lowered:
+        return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+
+    if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
 
     return None
@@ -266,6 +315,10 @@ class _StreamSettlement:
     response_id: str | None = None
     usage_settlement_transferred: bool = False
 
+    def reset(self) -> None:
+        fresh = type(self)()
+        self.__dict__.update(fresh.__dict__)
+
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
     if settlement.error is not None:
@@ -368,6 +421,7 @@ class _WebSocketRequestState:
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
+    bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None
@@ -401,6 +455,7 @@ class _WebSocketRequestState:
     useragent_group: str | None = None
     client_ip: str | None = None
     downstream_visible: bool = False
+    last_downstream_sequence_number: int | None = None
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
@@ -446,6 +501,8 @@ class _HTTPBridgeSession:
     queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
+    unanchored_reservation_id: str | None = None
+    admission_waiter_count: int = 0
     request_service_tier: str | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
@@ -456,6 +513,9 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
+    alias_registration_generation: int = 0
+    turn_state_alias_registration_generations: dict[str, int] = field(default_factory=dict)
+    previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
@@ -481,15 +541,51 @@ def _http_bridge_session_supports_service_tier(
     request_model: str | None,
     request_service_tier: str | None,
 ) -> bool:
-    if request_model is None or request_service_tier is None:
+    if request_model is None:
         return True
 
     registry = get_model_registry()
-    allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
-    if allowed_account_ids is not None:
-        return session.account.id in allowed_account_ids
+    # Mirror select_account: only apply model-account filtering when the model has
+    # registry plan-presence. An operator-mapped but unadvertised slug yields an
+    # authoritative-empty account catalog, which must not deny bridge session reuse.
+    # Explicitly suppressed catalog slugs must, however, not allow reuse because
+    # they intentionally block account selection even when the catalog is empty.
+    plan_types_for_model = getattr(registry, "plan_types_for_model", None)
+    model_allowed_plans = plan_types_for_model(request_model) if callable(plan_types_for_model) else None
+    is_suppressed_model = getattr(registry, "is_suppressed_model", None)
+    if callable(plan_types_for_model) and not model_allowed_plans:
+        if callable(is_suppressed_model) and is_suppressed_model(request_model):
+            return False
+        return True
+    account_indexes_cover_owner = True
+    get_snapshot = getattr(registry, "get_snapshot", None)
+    if callable(get_snapshot):
+        snapshot = get_snapshot()
+        account_indexes_cover_owner = snapshot is not None and session.account.id in snapshot.account_plans
+    account_ids_for_model = getattr(registry, "account_ids_for_model", None)
+    model_account_ids = (
+        account_ids_for_model(request_model)
+        if callable(account_ids_for_model) and account_indexes_cover_owner
+        else None
+    )
+    if model_account_ids is not None and session.account.id not in model_account_ids:
+        return False
+    # Keep bridge reuse aligned with account selection: clients commonly send
+    # these omit-equivalent values explicitly, but neither selects a specific
+    # service tier.
+    normalized_service_tier = request_service_tier.strip().lower() if request_service_tier is not None else None
+    if normalized_service_tier in {None, "auto", "default"}:
+        allowed_plans = model_allowed_plans
+    else:
+        allowed_account_ids = (
+            registry.account_ids_for_model_service_tier(request_model, request_service_tier)
+            if account_indexes_cover_owner
+            else None
+        )
+        if allowed_account_ids is not None:
+            return session.account.id in allowed_account_ids
 
-    allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
+        allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
     if allowed_plans is None:
         return True
     return account_plan_matches_allowed(session.account.plan_type, allowed_plans)
@@ -519,6 +615,8 @@ class _WebSocketUpstreamControl:
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
+    downstream_sequence_request_state: _WebSocketRequestState | None = None
+    downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
 
 
@@ -555,6 +653,8 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
     if not request_state.request_text:
         return False
     if request_state.replay_count >= 1:
+        return False
+    if request_state.last_downstream_sequence_number is not None:
         return False
     if request_state.downstream_visible:
         return False

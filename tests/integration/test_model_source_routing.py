@@ -422,7 +422,6 @@ async def test_source_unreachable_returns_error_envelope_and_releases_reservatio
         headers={"Authorization": f"Bearer {key}"},
         json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
     )
-
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "model_source_unreachable"
 

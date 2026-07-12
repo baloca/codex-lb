@@ -13,6 +13,14 @@ import app.modules.proxy.api as proxy_api_module
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _disable_fast_mode_policy_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def disabled() -> bool:
+        return False
+
+    monkeypatch.setattr(proxy_api_module, "_prohibit_fast_mode_enabled", disabled)
+
+
 def _request(headers: dict[str, str] | None = None) -> Request:
     encoded_headers = [
         (key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in (headers or {}).items()

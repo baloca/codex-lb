@@ -71,6 +71,12 @@ class Account(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Stable per-seat OpenAI principal identity (chatgpt_user_id / auth sub).
+    # Distinct from chatgpt_account_id, which is the shared Team/Business
+    # WORKSPACE identity. Two seats in one workspace share chatgpt_account_id
+    # but have different chatgpt_user_id. Used to target and verify reauth so
+    # repairing one seat cannot overwrite another seat sharing the workspace.
+    chatgpt_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     codex_installation_id: Mapped[str] = mapped_column(
         String(36),
         default=new_codex_installation_id,
@@ -448,11 +454,29 @@ class DashboardSettings(Base):
         server_default=text("'default'"),
         nullable=False,
     )
+    prohibit_fast_mode: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     http_downstream_transport_policy: Mapped[str] = mapped_column(
         String,
         default="smart",
         server_default=text("'smart'"),
         nullable=False,
+    )
+    proxy_account_response_create_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    proxy_account_stream_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    proxy_account_stream_recovery_reserve: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
@@ -609,6 +633,12 @@ class DashboardSettings(Base):
         Float,
         default=99.0,
         server_default=text("99.0"),
+        nullable=False,
+    )
+    limit_warmup_idle_threshold_percent: Mapped[float] = mapped_column(
+        Float,
+        default=1.0,
+        server_default=text("1.0"),
         nullable=False,
     )
     limit_warmup_min_available_percent: Mapped[float] = mapped_column(
