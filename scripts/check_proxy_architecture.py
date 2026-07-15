@@ -20,7 +20,10 @@ SERVICE_PACKAGE_DIR = PROXY_DIR / "_service"
 HTTP_BRIDGE_MIXIN_PATH = PROXY_DIR / "_service" / "http_bridge" / "mixin.py"
 STREAMING_MIXIN_PATH = PROXY_DIR / "_service" / "streaming" / "mixin.py"
 
-MAX_SERVICE_LINES = 2_600
+# Fork-local headroom (same C25 route-policy reason as the mixins below): upstream's
+# service.py sits exactly at its own 2_600 limit, and this fork's protected C25
+# response-create route-policy code adds a line on top, so its ceiling is raised.
+MAX_SERVICE_LINES = 2_650
 # Fork-local headroom: this fork's http_bridge/mixin.py carries the protected C25
 # response-create route-policy code that upstream does not, so its ceiling is set
 # slightly above upstream's 2_400.
