@@ -28,7 +28,9 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import parse_sse_event_payload
+from app.core.usage.live_hub import publish_live_usage
+from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.proxy._service.api_key_usage import (
@@ -288,6 +290,11 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 if message.kind == "text" and message.text is not None:
                     session.last_upstream_close_code = None
+                    if EVENT_MARKER in message.text:
+                        publish_live_usage(
+                            parse_rate_limit_event_text(message.text),
+                            account_id=session.account.id,
+                        )
                     await self._process_http_bridge_upstream_text(session, message.text)
                     if await self._retire_http_bridge_after_drain_if_ready(session):
                         break
@@ -334,7 +341,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         original_text = text
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
-        event = parse_sse_event(event_block)
+        event = parse_sse_event_payload(payload)
         event_type = _event_type_from_payload(event, payload)
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
@@ -364,6 +371,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             text,
             payload,
             event_block=event_block,
+            event=event,
         )
 
         async with session.pending_lock:

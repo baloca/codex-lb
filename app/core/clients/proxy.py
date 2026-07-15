@@ -76,6 +76,8 @@ from app.core.resilience.circuit_breaker import (
 )
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.usage.live_hub import publish_live_usage
+from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text, parse_rate_limit_headers
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -129,7 +131,13 @@ def _is_response_stream_terminal_event_type(event_type: str, *, enforce_openai_s
     return event_type == "error" and not enforce_openai_sdk_contract
 
 
-_SSE_READ_CHUNK_SIZE = 1 * 1024
+# 16 KiB reads: 1 KiB reads made a multi-MB SSE event cost thousands of
+# iterations, and each iteration's separator rescan froze the event loop
+# (see the scan cursor in _iter_sse_events).
+_SSE_READ_CHUNK_SIZE = 16 * 1024
+# Longest separator is 4 bytes; a separator can straddle a chunk boundary by
+# at most 3 bytes, so rescans back up this far into already-scanned bytes.
+_SSE_SEPARATOR_OVERLAP = 3
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
@@ -1008,9 +1016,9 @@ def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, n
     return max(0.001, timeout_seconds - max(0.0, now - started_at))
 
 
-def _find_sse_separator(buffer: bytes | bytearray) -> tuple[int, int] | None:
+def _find_sse_separator(buffer: bytes | bytearray, start: int = 0) -> tuple[int, int] | None:
     separators = (b"\r\n\r\n", b"\n\n", b"\r\r")
-    positions = [(buffer.find(separator), len(separator)) for separator in separators]
+    positions = [(buffer.find(separator, start), len(separator)) for separator in separators]
     valid_positions = [position for position in positions if position[0] >= 0]
     if not valid_positions:
         return None
@@ -1046,6 +1054,7 @@ async def _iter_sse_events(
             pass
 
     buffer = bytearray()
+    scanned = 0
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
 
@@ -1068,11 +1077,22 @@ async def _iter_sse_events(
 
         buffer.extend(chunk)
         while True:
-            raw_event = _pop_sse_event(buffer)
-            if raw_event is None:
+            # `scanned` marks the prefix already known to hold no separator,
+            # so each new chunk only scans the new bytes (plus the straddle
+            # overlap). Without the cursor, a large event re-scanned the
+            # entire accumulated buffer on every read — O(n^2) byte scanning
+            # that blocked the event loop for every in-flight stream.
+            separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
+            if separator is None:
+                scanned = len(buffer)
                 if len(buffer) > max_event_bytes:
                     raise StreamEventTooLargeError(len(buffer), max_event_bytes)
                 break
+            index, separator_len = separator
+            event_end = index + separator_len
+            raw_event = bytes(buffer[:event_end])
+            del buffer[:event_end]
+            scanned = 0
 
             if len(raw_event) > max_event_bytes:
                 raise StreamEventTooLargeError(len(raw_event), max_event_bytes)
@@ -2039,8 +2059,11 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
         )
     if payload_size <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
         return request_payload
+    # 400, not 413: the Codex client surfaces 400 immediately as a non-retryable
+    # invalid request, while 413 burns five full-payload retries and then pins the
+    # session to HTTP transport.
     raise ProxyResponseError(
-        413,
+        400,
         _response_create_too_large_error_envelope(payload_size, _UPSTREAM_RESPONSE_CREATE_MAX_BYTES),
         failure_phase="validation",
         failure_detail=f"response.create_bytes={payload_size}",
@@ -2477,6 +2500,8 @@ async def stream_responses(
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
@@ -2495,7 +2520,15 @@ async def stream_responses(
             allow_direct_egress=effective_allow_direct_egress,
             codex_installation_id=codex_installation_id,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            codex_lb_account_id=codex_lb_account_id,
+            suppress_live_usage=suppress_live_usage,
         ):
+            if not suppress_live_usage and (codex_lb_account_id or account_id) and EVENT_MARKER in event_block:
+                publish_live_usage(
+                    parse_rate_limit_event_text(event_block),
+                    account_id=codex_lb_account_id,
+                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                )
             yield event_block
 
 
@@ -2514,6 +2547,8 @@ async def _stream_responses_with_session(
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     headers = apply_codex_installation_headers(headers, codex_installation_id)
@@ -2630,6 +2665,15 @@ async def _stream_responses_with_session(
                 resp = _CodexSSEResponse(raw_resp)
                 status_code = resp.status
                 last_stream_activity_at = time.monotonic()
+                # Error responses (429/403) carry the saturated-window
+                # snapshot — exactly when freshness matters most — so headers
+                # are ingested regardless of status.
+                if not suppress_live_usage:
+                    publish_live_usage(
+                        parse_rate_limit_headers(getattr(raw_resp, "headers", None)),
+                        account_id=codex_lb_account_id,
+                        chatgpt_account_id=None if codex_lb_account_id else account_id,
+                    )
                 if resp.status >= 400:
                     if raise_for_status:
                         error_payload = await _error_payload_from_response(resp)
@@ -2718,6 +2762,12 @@ async def _stream_responses_with_session(
         ) as resp:
             status_code = resp.status
             last_stream_activity_at = time.monotonic()
+            if not suppress_live_usage:
+                publish_live_usage(
+                    parse_rate_limit_headers(getattr(resp, "headers", None)),
+                    account_id=codex_lb_account_id,
+                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                )
             if resp.status >= 400:
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)
