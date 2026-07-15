@@ -93,4 +93,3 @@ Warmup request rows SHALL be excluded from aggregate dashboard request/error/cos
 #### Scenario: API key usage summaries ignore warmup rows
 - **WHEN** API key usage summary/trend endpoints are queried for a key with warmup and normal rows
 - **THEN** warmup rows do not contribute to API key request/token/cost usage totals
-

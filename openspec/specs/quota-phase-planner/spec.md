@@ -201,4 +201,3 @@ Candidate warmup start times, planned window resets, pool-simulation window span
 - **WHEN** the planner derives candidate start times for a forecast peak
 - **THEN** peak-aligned candidates subtract 60 minutes rather than 5 hours
 - **AND** the planned action records a 60-minute window duration
-

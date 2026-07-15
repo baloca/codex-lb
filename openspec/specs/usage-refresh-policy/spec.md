@@ -613,4 +613,3 @@ Aggregated downstream rate-limit surfaces — the pooled `x-codex-{window}-*` re
 - **WHEN** the rate-limit status payload is computed
 - **THEN** `limit_reached` is false
 - **AND** the primary window is omitted from the payload instead of advertising the elapsed reset
-

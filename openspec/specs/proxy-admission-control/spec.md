@@ -324,4 +324,3 @@ before applying the highest-`used_percent` ranking, mirroring the
 - **WHEN** the balancer is invoked
 - **THEN** the account with the lexicographically smaller `account_id`
   is returned
-

@@ -658,4 +658,3 @@ emit `codex-lb` and MUST NOT advertise the external upstream provider name.
 - **AND** the source declares Chat Completions support only
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** the response does not include `local-coder`
-

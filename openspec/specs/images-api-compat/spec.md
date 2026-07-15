@@ -153,4 +153,3 @@ surface.
 - **THEN** the service records the `images_route_complete` observability entry
   (log and metrics) with the same `generations`/`edits` route label as the
   `/v1` counterpart, exactly once
-

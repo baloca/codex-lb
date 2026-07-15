@@ -64,4 +64,3 @@ Dashboard upstream proxy pool member mutations MUST reject attempts to add an en
 - **WHEN** an admin adds endpoint `E` to the same pool again
 - **THEN** the API MUST return a dashboard validation error
 - **AND** it MUST NOT return an unhandled server error.
-

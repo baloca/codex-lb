@@ -199,4 +199,3 @@ advisory-lock behavior.
 - **GIVEN** the deployment uses a file-backed SQLite database
 - **WHEN** an account status transition is persisted
 - **THEN** the write executes inside the shared SQLite writer section
-

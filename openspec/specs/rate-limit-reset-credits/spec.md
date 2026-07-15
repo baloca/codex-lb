@@ -126,4 +126,3 @@ The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_secon
 - **GIVEN** `rate_limit_reset_credits_refresh_interval_seconds` is set to `120`
 - **WHEN** the application starts and runs
 - **THEN** each eligible account's credits are fetched from upstream at most once per 120 seconds
-

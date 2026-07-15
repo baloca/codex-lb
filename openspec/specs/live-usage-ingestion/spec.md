@@ -65,4 +65,3 @@ The core client layer SHALL publish snapshots through a hub that no-ops until th
 
 - **WHEN** snapshots are published before an ingestor is registered
 - **THEN** they are discarded without error
-

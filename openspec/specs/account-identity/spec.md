@@ -21,4 +21,3 @@ Dashboard account summaries MUST expose and render the upstream ChatGPT account 
 - **WHEN** the dashboard renders the account workspace context
 - **THEN** it displays the ChatGPT account id
 - **AND** it does not display the generic unknown-workspace label
-

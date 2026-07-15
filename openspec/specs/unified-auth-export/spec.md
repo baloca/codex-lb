@@ -59,4 +59,3 @@ The Auth Export modal SHALL display a warning: "This payload contains raw access
 - **GIVEN** the "Auth Export" modal is open
 - **WHEN** the user switches between "codex" and "opencode" modes
 - **THEN** the security warning remains visible regardless of mode
-

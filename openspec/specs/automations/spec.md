@@ -215,4 +215,3 @@ Automation ping execution MUST avoid creating or mutating durable sticky-thread/
 
 - **WHEN** an automation ping run is executed
 - **THEN** existing durable sticky-thread/codex-session mappings for user conversations remain unchanged
-

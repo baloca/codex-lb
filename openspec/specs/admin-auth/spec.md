@@ -175,4 +175,3 @@ The migration for this change MUST update `dashboard_settings.dashboard_session_
 - **GIVEN** a dashboard settings row has `dashboard_session_ttl_seconds = 7200`
 - **WHEN** the migration runs
 - **THEN** the row still has `dashboard_session_ttl_seconds = 7200`
-

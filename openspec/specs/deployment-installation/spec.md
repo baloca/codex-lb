@@ -162,4 +162,3 @@ The operator documentation SHALL describe how to stop the old service, back up t
 - **GIVEN** the named Compose volume does not contain a root-level `PG_VERSION` file
 - **WHEN** the operator starts the normal `postgres` service with runtime PostgreSQL command arguments
 - **THEN** the guard delegates those arguments to the official Postgres entrypoint
-

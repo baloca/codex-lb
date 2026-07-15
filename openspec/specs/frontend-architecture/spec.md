@@ -2042,4 +2042,3 @@ Account summary payloads SHALL present the primary (short) quota window as absen
 
 - **WHEN** an account's primary sample has an unexpired `reset_at`
 - **THEN** the summary displays its used/remaining percentages, reset, and duration unchanged
-

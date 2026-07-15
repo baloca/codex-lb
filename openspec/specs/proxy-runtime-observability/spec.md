@@ -392,4 +392,3 @@ Request-log rows MUST be persisted by tracked background tasks that the response
 
 - **WHEN** the service shuts down gracefully with log writes in flight
 - **THEN** shutdown waits for them up to the configured drain timeout and reports tasks that failed to drain
-

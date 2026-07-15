@@ -196,4 +196,3 @@ sidecar WAL file.
 - **WHEN** the pre-migration backup is created
 - **THEN** those rows are queryable from the backup database
 - **AND** the backup passes SQLite integrity checking
-

@@ -37,4 +37,3 @@ Aggregate quota donuts SHALL omit assigned accounts whose visible assigned credi
 #### Scenario: Zero-credit account does not contribute to donut totals
 - **WHEN** an assigned account has zero visible credits for a 5h or weekly donut calculation
 - **THEN** that account is excluded from the corresponding donut total and legend contributions
-

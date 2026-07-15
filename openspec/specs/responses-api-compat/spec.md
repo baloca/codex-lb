@@ -3045,4 +3045,3 @@ Within each streaming layer (core client consumer, streaming mixin, bridge upstr
 
 - **WHEN** the rewrite step removes duplicate tool calls
 - **THEN** the returned line, payload, and validated event all reflect the rewritten content
-

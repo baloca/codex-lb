@@ -1083,4 +1083,3 @@ Settling a stream API-key reservation MUST NOT block the response/stream close, 
 
 - **WHEN** the service shuts down gracefully with settlements in flight
 - **THEN** shutdown waits for them up to the configured drain timeout
-

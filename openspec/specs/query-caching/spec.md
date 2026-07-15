@@ -402,4 +402,3 @@ Deleting an API key MUST delete its rollup row in the same transaction.
 - **GIVEN** an API key with a rollup row
 - **WHEN** the key is deleted
 - **THEN** the rollup row MUST be deleted in the same transaction
-

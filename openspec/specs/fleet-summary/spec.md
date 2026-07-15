@@ -114,4 +114,3 @@ The route MUST preserve existing usage-refresh rules for disabled refresh, fresh
 - **WHEN** a valid client calls `POST /api/fleet/refresh`
 - **THEN** active accounts are eligible for the refresh attempt
 - **AND** paused, reauth-required, and deactivated accounts are not attempted
-

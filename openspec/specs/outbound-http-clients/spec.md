@@ -392,4 +392,3 @@ The shared upstream TCP connectors MUST configure connection keepalive of at lea
 
 - **WHEN** the shared HTTP client initializes its direct TCP connectors
 - **THEN** they are constructed with `keepalive_timeout >= 90` and `ttl_dns_cache >= 300`
-

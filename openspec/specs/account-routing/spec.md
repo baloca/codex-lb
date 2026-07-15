@@ -313,4 +313,3 @@ When building account selection state, the proxy SHALL treat any main-window usa
 - **WHEN** selection state is built
 - **THEN** the weekly-primary remap into the secondary slot is evaluated on the raw samples
 - **AND** the elapsed-reset expiry applies to the remapped derived values
-
