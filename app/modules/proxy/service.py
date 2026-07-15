@@ -731,6 +731,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import (
+    NO_ALTERNATE_ACCOUNTS,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -1779,8 +1780,8 @@ class ProxyService(
                     if selected_account_id in excluded_account_ids_set:
                         return AccountSelection(
                             account=None,
-                            error_message="Selected single account is unavailable",
-                            error_code="single_account_unavailable",
+                            error_message="No alternate accounts available for this request",
+                            error_code=NO_ALTERNATE_ACCOUNTS,
                         )
                     if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
                         return AccountSelection(
@@ -1882,6 +1883,8 @@ class ProxyService(
                     concurrency_caps=concurrency_caps,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
+                    if selection.lease is not None:
+                        await self._load_balancer.release_account_lease(selection.lease)
                     logger.warning(
                         "Proxy account selection returned excluded account request_id=%s kind=%s request_stage=%s "
                         "account_id=%s excluded_count=%s",
@@ -1893,8 +1896,8 @@ class ProxyService(
                     )
                     return AccountSelection(
                         account=None,
-                        error_message="No active accounts available",
-                        error_code="no_accounts",
+                        error_message="No alternate accounts available for this request",
+                        error_code=NO_ALTERNATE_ACCOUNTS,
                     )
                 logger.info(
                     "Proxy account selection result request_id=%s kind=%s request_stage=%s model=%s "
@@ -2178,6 +2181,7 @@ _LOCAL_PROXY_ERROR_CODES = frozenset(
         "insufficient_image_quota",
         "ip_forbidden",
         "no_accounts",
+        NO_ALTERNATE_ACCOUNTS,
         "no_plan_support_for_model",
         "additional_quota_data_unavailable",
         "no_additional_quota_eligible_accounts",

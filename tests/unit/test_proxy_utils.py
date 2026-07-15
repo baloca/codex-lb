@@ -25759,6 +25759,63 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
 
 
 @pytest.mark.asyncio
+async def test_select_account_with_budget_types_excluded_single_account_as_no_alternate(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.routing_strategy = "single_account"
+    settings.single_account_id = "acc_single_excluded"
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    select_account = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+
+    selection = await service._select_account_with_budget(
+        deadline=123.0,
+        request_id="req-single-excluded",
+        kind="http_bridge",
+        exclude_account_ids={"acc_single_excluded"},
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.NO_ALTERNATE_ACCOUNTS
+    assert selection.error_message == "No alternate accounts available for this request"
+    select_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_select_account_with_budget_types_defensive_excluded_result_as_no_alternate(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_defensive_excluded")
+    lease = AccountLease(
+        lease_id="lease_defensive_excluded",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None, lease=lease))
+    release_lease = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+
+    selection = await service._select_account_with_budget(
+        deadline=123.0,
+        request_id="req-defensive-excluded",
+        kind="http_bridge",
+        exclude_account_ids={account.id},
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.NO_ALTERNATE_ACCOUNTS
+    assert selection.error_message == "No alternate accounts available for this request"
+    release_lease.assert_awaited_once_with(lease)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("request_stage", "expected_reserve"),
     [("first_turn", 3), ("follow_up", 3), ("bootstrap_rebind", 3), ("reattach", 0)],
@@ -29447,6 +29504,59 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
     assert session.downstream_turn_state == expected_turn_state
     assert session.headers.get("x-codex-turn-state") == expected_turn_state
     upstream.send_text.assert_awaited_once_with(request_state.request_text)
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_preserves_primary_error_without_alternate(
+    monkeypatch,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_no_alternate")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_no_alternate",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"retry"}',
+        preferred_account_id=account.id,
+    )
+    upstream = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-no-alternate", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=account,
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    reconnect = AsyncMock(
+        side_effect=proxy_module.ProxyResponseError(
+            503,
+            openai_error(
+                load_balancer_module.NO_ALTERNATE_ACCOUNTS,
+                "No alternate accounts available for this request",
+            ),
+        )
+    )
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_awaited_once_with(session, request_state=request_state)
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.error_code_override is None
+    assert request_state.error_message_override is None
+    upstream.send_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio

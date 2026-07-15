@@ -26,7 +26,7 @@ from app.core.utils.request_id import (
     set_request_id,
     set_request_scope_id,
 )
-from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionRecord
+from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionRecord, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
@@ -34,7 +34,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
     _reserve_http_bridge_unanchored_handoff,
 )
-from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.load_balancer import NO_ALTERNATE_ACCOUNTS, AccountSelection
 
 pytestmark = pytest.mark.integration
 _TEST_SYNC_TIMEOUT_SECONDS = 5.0
@@ -6453,10 +6453,13 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
     monkeypatch,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
-    account_id = await _import_account(async_client, "acc_http_bridge_retry", "http-bridge-retry@example.com")
-    account = await _get_account(account_id)
+    account_a_id = await _import_account(async_client, "acc_http_bridge_retry_a", "http-bridge-retry-a@example.com")
+    account_b_id = await _import_account(async_client, "acc_http_bridge_retry_b", "http-bridge-retry-b@example.com")
+    account_a = await _get_account(account_a_id)
+    account_b = await _get_account(account_b_id)
     upstreams = [_PrecreatedCloseUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
     connect_count = 0
+    seen_exclusions: list[set[str]] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -6478,6 +6481,8 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
         preferred_account_id=None,
     ):
         del preferred_account_id
+        excluded = set(cast(set[str] | None, exclude_account_ids) or ())
+        seen_exclusions.append(excluded)
         del (
             self,
             deadline,
@@ -6491,10 +6496,16 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
             prefer_earlier_reset_accounts,
             routing_strategy,
             model,
-            exclude_account_ids,
             additional_limit_name,
         )
-        return AccountSelection(account=account, error_message=None, error_code=None)
+        selected = next((account for account in (account_a, account_b) if account.id not in excluded), None)
+        if selected is None:
+            return AccountSelection(
+                account=None,
+                error_message="No alternate accounts available for this request",
+                error_code=NO_ALTERNATE_ACCOUNTS,
+            )
+        return AccountSelection(account=selected, error_message=None, error_code=None)
 
     async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
         del self, force, timeout_seconds
@@ -6530,6 +6541,135 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
 
     assert response.status_code == 200
     assert connect_count == 2
+    assert seen_exclusions == [set(), {account_a.id}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "stream"),
+    [
+        ("/v1/responses", False),
+        ("/backend-api/codex/responses", True),
+    ],
+)
+async def test_responses_http_bridge_preserves_primary_error_when_no_alternate_account(
+    async_client,
+    monkeypatch,
+    path,
+    stream,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    upstream = _PrecreatedCloseUpstreamWebSocket()
+
+    account_id = await _import_account(
+        async_client,
+        f"acc_http_bridge_no_alternate_{'backend' if stream else 'v1'}",
+        f"http-bridge-no-alternate-{'backend' if stream else 'v1'}@example.com",
+    )
+    account = await _get_account(account_id)
+    connect_count = 0
+    seen_exclusions: list[set[str]] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        excluded = set(cast(set[str] | None, exclude_account_ids) or ())
+        seen_exclusions.append(excluded)
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            additional_limit_name,
+            api_key,
+        )
+        if account.id in excluded:
+            return AccountSelection(
+                account=None,
+                error_message="No alternate accounts available for this request",
+                error_code=NO_ALTERNATE_ACCOUNTS,
+            )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    response = await async_client.post(
+        path,
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "no-alternate",
+            "prompt_cache_key": f"no-alternate-{'backend' if stream else 'v1'}",
+            "stream": stream,
+        },
+    )
+
+    if stream:
+        assert response.status_code == 200
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        assert events[-1]["type"] == "response.failed"
+        assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
+    else:
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "stream_incomplete"
+    assert connect_count == 1
+    assert seen_exclusions == [set(), {account.id}]
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RequestLog).where(RequestLog.account_id == account.id).order_by(RequestLog.requested_at.desc())
+        )
+        request_log = result.scalars().first()
+    assert request_log is not None
+    assert request_log.status == "error"
+    assert request_log.error_code == "stream_incomplete"
 
 
 @pytest.mark.asyncio

@@ -110,6 +110,7 @@ NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 ADDITIONAL_QUOTA_EXHAUSTED = "quota_exhausted"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+NO_ALTERNATE_ACCOUNTS = "no_alternate_accounts"
 _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus", "edu"})
 _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
@@ -354,6 +355,7 @@ class LoadBalancer:
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
+        request_scoped_selection = scoped_account_ids is not None or bool(excluded_ids)
 
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
@@ -393,7 +395,9 @@ class LoadBalancer:
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
-                if require_security_work_authorized and not filtered_accounts:
+                if not filtered_accounts:
+                    # The pre-exclusion pool was non-empty; only this request's
+                    # failover exclusions removed every candidate.
                     return _SelectionInputs(
                         accounts=[],
                         latest_primary={},
@@ -401,8 +405,8 @@ class LoadBalancer:
                         latest_monthly=selection_inputs.latest_monthly,
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
-                        error_message="No accounts marked as authorized for security work",
-                        error_code="no_security_work_authorized_accounts",
+                        error_message="No alternate accounts available for this request",
+                        error_code=NO_ALTERNATE_ACCOUNTS,
                     )
                 selection_inputs = _SelectionInputs(
                     accounts=filtered_accounts,
@@ -828,7 +832,7 @@ class LoadBalancer:
                     error_message=error_message,
                     error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
                 )
-            if error_message == "No available accounts":
+            if error_message == "No available accounts" and not request_scoped_selection:
                 set_degraded("all upstream accounts are unavailable")
                 error_message = _format_degraded_error_message(error_message)
             return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)

@@ -166,6 +166,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
+from app.modules.proxy.load_balancer import NO_ALTERNATE_ACCOUNTS
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -1292,14 +1293,17 @@ class _HTTPBridgeRequestSubmitMixin:
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:
-            request_state.error_code_override, request_state.error_message_override = (
-                _http_bridge_precreated_retry_failure_error(exc)
-            )
+            retry_error_code, retry_error_message = _http_bridge_precreated_retry_failure_error(exc)
+            # No upstream replay happened when request-local exclusions left no
+            # candidate, so the original close/idle failure remains authoritative.
+            if retry_error_code != NO_ALTERNATE_ACCOUNTS:
+                request_state.error_code_override = retry_error_code
+                request_state.error_message_override = retry_error_message
             if isinstance(exc, ProxyResponseError):
                 logger.info(
                     "HTTP bridge pre-created retry failed with terminal proxy error code=%s message=%s",
-                    request_state.error_code_override,
-                    request_state.error_message_override,
+                    retry_error_code,
+                    retry_error_message,
                 )
             else:
                 logger.warning("HTTP bridge pre-created retry failed", exc_info=True)

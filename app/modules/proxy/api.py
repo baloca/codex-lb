@@ -177,6 +177,7 @@ from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import record_images_route_observability
+from app.modules.proxy.load_balancer import NO_ALTERNATE_ACCOUNTS
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
@@ -317,6 +318,7 @@ internal_router = APIRouter(
 _TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_accounts",
+    NO_ALTERNATE_ACCOUNTS,
     "no_plan_support_for_model",
     "additional_quota_data_unavailable",
     "quota_exhausted",

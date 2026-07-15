@@ -1538,8 +1538,11 @@ class _StreamingRetryMixin:
                             # Record remaining errors so total equals transient_retries,
                             # meeting the load balancer backoff threshold (error_count >= 3).
                             await proxy._load_balancer.record_errors(account, transient_retries - 1)
-                            # Preserve last ProxyResponseError for propagate_http_errors path.
-                            if isinstance(tex, ProxyResponseError):
+                            # Preserve the primary upstream failure when account
+                            # exclusions leave no failover candidate.
+                            if isinstance(tex, _TransientStreamError):
+                                last_retryable_stream_error = _RetryableStreamError(tex.code, tex.error)
+                            elif isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
                             await _release_tracked_stream_lease(current_account_lease)
                             current_account_lease = None
