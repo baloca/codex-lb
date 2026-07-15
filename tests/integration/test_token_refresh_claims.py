@@ -32,6 +32,13 @@ from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.integration
 
+# Account-concurrency-slot lease kinds. Upstream's failover-lease-release
+# regressions assume the selection lease is ``stream``; the protected fork
+# ``/backend-api/codex/responses`` route instead selects (and reuses) a
+# ``response_create`` capacity lease as the account's single concurrency slot,
+# so both kinds represent "the slot that must be freed before failover" here.
+_CONCURRENCY_LEASE_KINDS = frozenset({"stream", "response_create"})
+
 
 @pytest.fixture(autouse=True)
 def _clear_refresh_state() -> None:
@@ -1321,15 +1328,16 @@ async def test_proxy_preflight_permanent_refresh_releases_lease_before_failover(
 
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
 
-    # Track only the tracked stream-concurrency lease (kind == "stream"); the
-    # per-attempt ``response_create`` lease acquired inside ``_stream_once`` is a
-    # DIFFERENT lease and would otherwise mask whether the stream-concurrency
-    # slot was actually freed at failover.
+    # Track the account's concurrency-slot lease (see ``_CONCURRENCY_LEASE_KINDS``).
+    # On the protected fork ``/backend-api/codex/responses`` route the selection
+    # lease is ``response_create`` (not ``stream``), and it is reused for the
+    # stream attempt rather than paired with a separate per-attempt lease, so it is
+    # the single slot whose release-before-failover we assert here.
     released_lease_account_ids: list[str] = []
     original_release = proxy_module.LoadBalancer.release_account_lease
 
     async def spy_release(self, lease):
-        if lease is not None and lease.kind == "stream":
+        if lease is not None and lease.kind in _CONCURRENCY_LEASE_KINDS:
             released_lease_account_ids.append(lease.account_id)
         return await original_release(self, lease)
 
@@ -1425,16 +1433,16 @@ async def test_proxy_post_401_permanent_refresh_releases_lease_before_failover(a
 
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
 
-    # Track only the tracked stream-concurrency lease (kind == "stream"). The
-    # failed account opens a real stream (to receive the 401), so ``_stream_once``
-    # acquires and releases a separate ``response_create`` lease for it; without
-    # this filter that unrelated release would mask whether the stream-concurrency
-    # slot itself was freed at the permanent-failure failover.
+    # Track the account's concurrency-slot lease (see ``_CONCURRENCY_LEASE_KINDS``).
+    # On the protected fork ``/backend-api/codex/responses`` route the selection
+    # lease is ``response_create`` and is reused for the stream attempt (protected
+    # commit 8a2e8354), so the failed account holds exactly one concurrency lease
+    # and there is no separate per-attempt lease that could mask a leaked slot.
     released_lease_account_ids: list[str] = []
     original_release = proxy_module.LoadBalancer.release_account_lease
 
     async def spy_release(self, lease):
-        if lease is not None and lease.kind == "stream":
+        if lease is not None and lease.kind in _CONCURRENCY_LEASE_KINDS:
             released_lease_account_ids.append(lease.account_id)
         return await original_release(self, lease)
 
