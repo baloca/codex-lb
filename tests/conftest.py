@@ -22,6 +22,11 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
+# The shared aiohttp client deliberately honors proxy environment settings in
+# production. Tests host mock upstreams on loopback; bypass ambient system
+# proxies so those requests cannot be transformed into unrelated proxy 503s.
+os.environ["NO_PROXY"] = "*"
+os.environ["no_proxy"] = "*"
 # The app-level automations scheduler ticks on the real clock; with leader
 # election enabled its startup tick runs as a background task and can land
 # inside a test that stages its own due-now jobs, racing the test's
