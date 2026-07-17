@@ -485,4 +485,3 @@ tied candidates are reordered.
 - **GIVEN** a fixed set of candidate accounts and a fixed per-replica salt
 - **WHEN** the `round_robin` strategy selects repeatedly with unchanged state
 - **THEN** the same account is selected every time
-

@@ -159,4 +159,3 @@ retention MUST NOT run a pass.
 - **GIVEN** dashboard and env retention both resolve to 0
 - **WHEN** the scheduler ticks
 - **THEN** no retention pass runs
-

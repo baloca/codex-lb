@@ -442,4 +442,3 @@ Per-account concurrency caps are partitioned per bridge-ring replica and are cor
 - **WHEN** the process loads its settings at startup
 - **THEN** startup fails with a settings validation error naming `CODEX_LB_WORKERS_PER_INSTANCE`
 - **AND** the error states multi-worker-per-instance is not supported and directs the operator to run one worker per pod/container and scale via replicas
-

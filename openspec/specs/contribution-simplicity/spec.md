@@ -80,4 +80,3 @@ A PR that changes what the dashboard renders MUST include before/after screensho
 
 - **WHEN** a PR alters dashboard rendering and its body contains no screenshots or recording
 - **THEN** the reviewer blocks the PR until visual evidence is attached
-

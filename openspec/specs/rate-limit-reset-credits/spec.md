@@ -216,4 +216,3 @@ After a successful consume (dashboard or `POST /v1/reset-credit`) and after a co
 - **WHEN** a consume for account X succeeds on replica A and bumps the `reset_credits` namespace
 - **THEN** replica A evicts only account X's snapshot
 - **AND** account Y's cached snapshot on replica A survives (replica A does not clear its whole store in response to its own bump)
-

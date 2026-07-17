@@ -490,4 +490,3 @@ The service MUST expose a Prometheus gauge named `codex_lb_cap_partition_replica
 - **WHEN** a partition refresh observes and adopts two active members
 - **THEN** `codex_lb_cap_partition_replicas` reports 2
 - **AND** an info-level log records the rebalance from count 1 to count 2 with the replica's rank
-

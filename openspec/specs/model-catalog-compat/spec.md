@@ -832,4 +832,3 @@ At startup every replica SHALL load the persisted model-registry snapshot into i
 - **AND** the only `model_registry_snapshot` row is a previously published snapshot whose age now exceeds `model_registry_snapshot_max_age_seconds`
 - **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
 - **THEN** it drops the unpublished catalog, reverts to the bootstrap floor, and invalidates its account-selection cache
-

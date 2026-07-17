@@ -468,4 +468,3 @@ Every process-local cache that serves security, authorization, or routing decisi
 - **GIVEN** a replica's poller cannot read the `cache_invalidation` table
 - **WHEN** three consecutive polls fail
 - **THEN** a WARNING is logged and the poll-failure counter increments
-

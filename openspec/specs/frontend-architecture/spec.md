@@ -2116,4 +2116,3 @@ to the Advanced menu unless a spec explicitly designates it as core.
 
 - **WHEN** a user opens `/firewall`
 - **THEN** the app redirects to `/settings`
-

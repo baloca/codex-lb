@@ -239,4 +239,3 @@ Migration state inspection SHALL classify `alembic_version` revisions that are n
 - **AND** `alembic_version` contains a revision unknown to the running build
 - **WHEN** the upgrade runs
 - **THEN** it fails with the ahead-specific guidance rather than a generic unsupported-revision remap error
-

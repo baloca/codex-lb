@@ -297,4 +297,3 @@ labels, so the override MUST NOT apply there: a change that would leave
 - **WHEN** a budget is exceeded
 - **THEN** no pull-request label set is resolved and the check fails
   regardless of any label on the originating pull request
-

@@ -276,4 +276,3 @@ integrity error that aborts the remainder of a planning tick.
 - **WHEN** one decision's idempotency key was concurrently inserted by another
   writer
 - **THEN** the tick continues logging the remaining accounts' decisions
-

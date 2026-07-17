@@ -58,4 +58,3 @@ OpenSpec remains the normative source of truth. Every docs page that documents s
 - **WHEN** `.env.example` is read
 - **THEN** it contains the commented line `# CODEX_LB_LEADER_ELECTION_ENABLED=false`
 - **AND** no active (uncommented) assignment disables leader election
-

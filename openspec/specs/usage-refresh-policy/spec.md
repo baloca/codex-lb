@@ -1271,4 +1271,3 @@ On the HTTP bridge / forwarded compact path the caller passes an `api_key_reserv
 - **GIVEN** a compact-responses request whose inner `_call_compact` budget check finds the request budget exhausted and raises the budget-exhausted `upstream_request_timeout` error
 - **WHEN** the enclosing retry-loop `except ProxyResponseError` handler settles the reservation on the `upstream_request_timeout` branch before raising
 - **THEN** no additional settle is performed at the inner terminal, so the reservation is settled exactly once
-

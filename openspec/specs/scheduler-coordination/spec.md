@@ -292,4 +292,3 @@ The Auth Guardian scheduler is the one exception to the escape hatch: because it
 - **WHEN** the Auth Guardian scheduler is built
 - **THEN** the scheduler is disabled
 - **AND** a warning log states that the guardian is disabled because the ring runs without leader election
-

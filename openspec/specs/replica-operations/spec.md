@@ -328,4 +328,3 @@ seat mismatch, identity conflict, and unexpected errors).
   durable `error` write that the monotonic guard rejects
 - **THEN** the loser reports the durable `success` (not an error) and does not
   leave the local flow in `error`
-
