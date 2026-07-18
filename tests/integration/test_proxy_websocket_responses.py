@@ -17,6 +17,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
 from app.core.utils.request_id import get_request_id
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
+from app.modules.proxy.affinity import _codex_session_selection_key
 
 pytestmark = pytest.mark.integration
 
@@ -1414,7 +1415,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
     assert seen_headers["x-codex-turn-state"] != cast(str, seen["sticky_key"])
-    assert seen["sticky_key"] == "thread-ws-1"
+    assert seen["sticky_key"] == _codex_session_selection_key("thread-ws-1")
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
@@ -2953,7 +2954,10 @@ def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh
                 assert json.loads(websocket.receive_text())["type"] == "response.completed"
 
     assert turn_states[0] != turn_states[1]
-    assert [selection["key"] for selection in selections] == ["session-reconnect", "session-reconnect"]
+    assert [selection["key"] for selection in selections] == [
+        _codex_session_selection_key("session-reconnect"),
+        _codex_session_selection_key("session-reconnect"),
+    ]
     assert [selection["kind"] for selection in selections] == [
         proxy_module.StickySessionKind.CODEX_SESSION,
         proxy_module.StickySessionKind.CODEX_SESSION,

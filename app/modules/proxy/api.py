@@ -878,6 +878,7 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        forwarded_file_owner_account_id=forwarded_request_context.context.file_owner_account_id,
         forwarded_client_ip=forwarded_request_context.context.client_ip,
         # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
         # output, synthesize ``response.created``) MUST be applied by the
@@ -4251,6 +4252,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    forwarded_file_owner_account_id: str | None = None,
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
     prohibit_fast_mode: bool = False,
@@ -4398,6 +4400,7 @@ async def _stream_responses(
             forwarded_legacy_signature=forwarded_legacy_signature,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
