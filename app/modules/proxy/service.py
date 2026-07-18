@@ -564,8 +564,10 @@ from app.modules.proxy._service.support import (
     _DownstreamWebSocketActivity,  # noqa: F401
     _event_type_from_payload,  # noqa: F401
     _FilePinEntry,
+    _finalize_ttft_reasoning_deltas,  # noqa: F401
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_ttft_event,  # noqa: F401
     _PreparedWebSocketRequest,  # noqa: F401
     _record_response_event,  # noqa: F401
     _record_websocket_route_metadata,  # noqa: F401
@@ -577,6 +579,8 @@ from app.modules.proxy._service.support import (
     _supported_optional_kwargs,  # noqa: F401
     _TerminalStreamError,  # noqa: F401
     _TransientStreamError,  # noqa: F401
+    _ttft_event_visible_at,  # noqa: F401
+    _TTFTReasoningDeltaState,  # noqa: F401
     _wait_for_websocket_continuity_gap,  # noqa: F401
     _websocket_full_replay_should_wait_for_continuity,  # noqa: F401
     _websocket_request_can_replay_before_visible_output,  # noqa: F401

@@ -148,6 +148,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSessionKey,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
+    _ttft_event_visible_at,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -201,10 +202,6 @@ from app.modules.proxy.helpers import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
-# TTFT anchors to the first model output of any kind, reasoning included.
-_FIRST_TOKEN_EVENT_TYPES = _TEXT_DELTA_EVENT_TYPES | frozenset(
-    {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}
-)
 _REQUEST_TRANSPORT_HTTP = "http"
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
@@ -2218,10 +2215,14 @@ class _HTTPBridgeStreamingMixin:
                 keepalive_count = 0
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
-                if request_state.latency_first_token_ms is None and block_event_type in _FIRST_TOKEN_EVENT_TYPES:
-                    request_state.latency_first_token_ms = int(
-                        (_service_time().monotonic() - request_state.started_at) * 1000
+                if request_state.latency_first_token_ms is None:
+                    ttft_visible_at = _ttft_event_visible_at(
+                        block_event_type, block_payload, request_state.ttft_reasoning_deltas
                     )
+                    if ttft_visible_at is not None:
+                        request_state.latency_first_token_ms = max(
+                            0, int((ttft_visible_at - request_state.started_at) * 1000)
+                        )
                 if not propagate_http_errors and _is_previous_response_not_found_error(
                     code=_normalize_error_code(
                         _websocket_event_error_code(block_event_type, block_payload),

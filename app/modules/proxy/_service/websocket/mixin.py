@@ -309,7 +309,6 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
-    _FIRST_TOKEN_EVENT_TYPES,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
@@ -319,6 +318,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
     _event_type_from_payload,
+    _finalize_ttft_reasoning_deltas,
     _PreparedWebSocketRequest,
     _record_response_event,
     _record_websocket_route_metadata,
@@ -3666,8 +3666,14 @@ class _WebSocketMixin:
                     request_state.latency_first_upstream_event_ms = elapsed_ms
                 if event_type == "response.created" and request_state.latency_response_created_ms is None:
                     request_state.latency_response_created_ms = elapsed_ms
-                if event_type in _FIRST_TOKEN_EVENT_TYPES and request_state.latency_first_token_ms is None:
-                    request_state.latency_first_token_ms = elapsed_ms
+                if request_state.latency_first_token_ms is None:
+                    ttft_visible_at = _facade()._ttft_event_visible_at(
+                        event_type, payload, request_state.ttft_reasoning_deltas
+                    )
+                    if ttft_visible_at is not None:
+                        request_state.latency_first_token_ms = max(
+                            0, int((ttft_visible_at - request_state.started_at) * 1000)
+                        )
                 actual_service_tier = _facade()._service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
@@ -4316,6 +4322,11 @@ class _WebSocketMixin:
             request_state.api_key_reservation = None
             return
 
+        if request_state.latency_first_token_ms is None:
+            ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+            if ttft_visible_at is not None:
+                request_state.latency_first_token_ms = max(0, int((ttft_visible_at - request_state.started_at) * 1000))
+
         if event_type == "error":
             error = event.error if event else None
             status = "error"
@@ -4734,6 +4745,12 @@ class _WebSocketMixin:
             if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
+            if request_state.latency_first_token_ms is None:
+                ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+                if ttft_visible_at is not None:
+                    request_state.latency_first_token_ms = max(
+                        0, int((ttft_visible_at - request_state.started_at) * 1000)
+                    )
             await proxy._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
