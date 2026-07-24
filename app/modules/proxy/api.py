@@ -894,6 +894,8 @@ async def responses(
         openai_cache_affinity=True,
         prefer_http_bridge=True,
         prohibit_fast_mode=prohibit_fast_mode,
+        account_selection_lease_kind="response_create",
+        wait_for_account_response_create_capacity=True,
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
@@ -961,6 +963,18 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    route_policy = request.headers.get("x-codex-lb-route-policy", "").strip().lower().replace("-", "_")
+    supported_route_policies = {"responses_stateless_batch", "responses_stateless_batch_cached"}
+    if route_policy and route_policy not in supported_route_policies:
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error(
+                "route_policy_unsupported",
+                f"Unsupported responses route policy: {route_policy}",
+                error_type="invalid_request_error",
+            ),
+        )
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
@@ -1010,6 +1024,42 @@ async def v1_responses(
         responses_payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    if route_policy:
+        conflict: str | None = None
+        if responses_payload.stream is True:
+            conflict = "responses_stateless_batch requires stream=false"
+        elif responses_payload.previous_response_id:
+            conflict = "responses_stateless_batch does not support previous_response_id"
+        elif responses_payload.conversation:
+            conflict = "responses_stateless_batch does not support conversation"
+        elif responses_payload.prompt_cache_key and route_policy != "responses_stateless_batch_cached":
+            conflict = "responses_stateless_batch does not support prompt_cache_key"
+        else:
+            for header_name in ("session_id", "x-codex-session-id", "x-codex-conversation-id", "x-codex-turn-state"):
+                if request.headers.get(header_name, "").strip():
+                    conflict = f"responses_stateless_batch does not support {header_name}"
+                    break
+        if conflict is not None:
+            return _logged_error_json_response(
+                request,
+                400,
+                openai_error("route_policy_conflict", conflict, error_type="invalid_request_error"),
+                headers={"x-codex-lb-route-policy": route_policy},
+            )
+        response = await _collect_responses(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            codex_session_affinity=False,
+            openai_cache_affinity=route_policy == "responses_stateless_batch_cached",
+            prefer_http_bridge=False,
+            prohibit_fast_mode=prohibit_fast_mode,
+            account_selection_lease_kind="response_create",
+            wait_for_account_response_create_capacity=True,
+        )
+        response.headers["x-codex-lb-route-policy"] = route_policy
+        return response
     if responses_payload.stream:
         return await _stream_responses(
             request,
@@ -4533,6 +4583,8 @@ async def _stream_responses(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     prohibit_fast_mode: bool = False,
+    account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+    wait_for_account_response_create_capacity: bool = False,
 ) -> Response:
     # Owner-forwarded payloads have already passed API-key enforcement,
     # account-catalog fallback, reservation, and signing on the origin
@@ -4696,6 +4748,8 @@ async def _stream_responses(
             forwarded_affinity_key=forwarded_affinity_key,
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     else:
@@ -4709,6 +4763,8 @@ async def _stream_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             client_ip=client_ip,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     capacity_wait_event = asyncio.Event()
@@ -4784,6 +4840,8 @@ async def _collect_responses(
     suppress_text_done_events: bool = False,
     prefer_http_bridge: bool = False,
     prohibit_fast_mode: bool = False,
+    account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+    wait_for_account_response_create_capacity: bool = False,
 ) -> Response:
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
@@ -4829,6 +4887,8 @@ async def _collect_responses(
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
             client_ip=client_ip,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
         )
     else:
         stream = context.service.stream_responses(
@@ -4841,6 +4901,8 @@ async def _collect_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             client_ip=client_ip,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
         )
     captured_turn_state_headers: dict[str, str] = {}
     try:

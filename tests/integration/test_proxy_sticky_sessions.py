@@ -186,7 +186,7 @@ async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_bare_session_spills_under_cap_without_rebinding(async_client, monkeypatch):
+async def test_proxy_stream_bare_session_spills_under_response_create_cap_without_rebinding(async_client, monkeypatch):
     from app.dependencies import get_proxy_service_for_app
     from app.modules.proxy.sticky_repository import StickySessionsRepository
 
@@ -204,8 +204,10 @@ async def test_proxy_stream_bare_session_spills_under_cap_without_rebinding(asyn
         )
 
     service = get_proxy_service_for_app(async_client._transport.app)
-    saturated_leases = [await service._load_balancer.acquire_account_lease(owner_id, kind="stream") for _ in range(8)]
-    assert all(lease is not None for lease in saturated_leases)
+    saturated_leases = []
+    while lease := await service._load_balancer.acquire_account_lease(owner_id, kind="response_create"):
+        saturated_leases.append(lease)
+    assert saturated_leases
     seen: list[str] = []
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):

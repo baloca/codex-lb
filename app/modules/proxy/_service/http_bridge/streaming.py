@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from collections.abc import AsyncGenerator, Callable
-from typing import Any, AsyncIterator, Mapping, TypeVar, cast
+from typing import Any, AsyncIterator, Literal, Mapping, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -517,6 +517,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_affinity_key: str | None = None,
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
+        account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+        wait_for_account_response_create_capacity: bool = False,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
@@ -540,6 +542,8 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_key=forwarded_affinity_key,
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
+            account_selection_lease_kind=account_selection_lease_kind,
+            wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
 
@@ -563,6 +567,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_affinity_key: str | None = None,
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
+        account_selection_lease_kind: Literal["response_create", "stream"] | None = "stream",
+        wait_for_account_response_create_capacity: bool = False,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
@@ -620,6 +626,8 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 upstream_stream_transport_override=force_upstream_stream_transport,
                 client_ip=client_ip,
+                account_selection_lease_kind=account_selection_lease_kind,
+                wait_for_account_response_create_capacity=wait_for_account_response_create_capacity,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
                 yield line

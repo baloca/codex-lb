@@ -740,7 +740,7 @@ async def test_select_account_reports_missing_security_work_when_authorized_acco
     )
 
     assert selection.account is None
-    assert selection.error_code == load_balancer_module.NO_ALTERNATE_ACCOUNTS
+    assert selection.error_code == "no_security_work_authorized_accounts"
 
 
 @pytest.mark.asyncio

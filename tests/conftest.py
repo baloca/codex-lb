@@ -22,6 +22,10 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
+# The shared aiohttp client honors proxy environment settings in production.
+# Tests host mock upstreams on loopback, so bypass ambient proxies here.
+os.environ["NO_PROXY"] = "*"
+os.environ["no_proxy"] = "*"
 # Route-resolution caching is opt-in per test (cache-specific tests set a TTL
 # explicitly); keeping it off preserves fresh-read semantics everywhere else.
 os.environ["CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS"] = "0"

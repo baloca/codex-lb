@@ -182,6 +182,7 @@ class TestMidRequestFailurePreservesPreviousResponseId:
     async def test_mid_request_failure_with_previous_response_id_raises_502(
         self,
         monkeypatch,
+        db_setup,
     ):
         """BUG REGRESSION: mid-request websocket failure + previous_response_id.
 
@@ -190,6 +191,7 @@ class TestMidRequestFailurePreservesPreviousResponseId:
         FIXED: raises ProxyResponseError(502, upstream_unavailable)
           -> CLI retries with previous_response_id -> 2.3K tokens/turn
         """
+        del db_setup
         service = proxy_service.ProxyService(cast(Any, nullcontext()))
         session = _make_session(closed=False)
         request_state = _make_request_state(

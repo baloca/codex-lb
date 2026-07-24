@@ -143,6 +143,7 @@ NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 ADDITIONAL_QUOTA_EXHAUSTED = "quota_exhausted"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+NO_ALTERNATE_ACCOUNTS = "no_alternate_accounts"
 _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus", "edu"})
 _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
