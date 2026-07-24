@@ -18,10 +18,12 @@ from app.core.auth.refresh import RefreshError, is_transient_refresh_contention,
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
-from app.core.errors import openai_error
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
 from app.core.plan_types import account_plan_matches_allowed
+from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_CODE
+from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.db.models import Account
@@ -43,17 +45,26 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
-# First-token (TTFT) detection: reasoning models stream reasoning deltas long
-# before visible text, so the first model output of ANY kind anchors TTFT.
-# Text-delta semantics elsewhere (visibility, done-suppression) stay text-only.
-_FIRST_TOKEN_EVENT_TYPES = frozenset(
+_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n|\Z)")
+_TTFT_EVENT_TYPES = frozenset(
     {
         "response.output_text.delta",
         "response.refusal.delta",
-        "response.reasoning_summary_text.delta",
         "response.reasoning_text.delta",
     }
 )
+_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset({"response.function_call_arguments.delta", "response.output_tool_call.delta"})
+_TTFT_REASONING_EVENT_TYPES = frozenset(
+    {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
+)
+_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
+    "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
+    "apply_patch_call": "apply_patch_call_output",
+}
+_PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
+_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
+_TTFT_OUTPUT_ITEM_TYPES = _PENDING_TOOL_CALL_ITEM_TYPES - {"function_call"}
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
@@ -80,6 +91,162 @@ _PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVa
     "propagated_capacity_startup_ready",
     default=None,
 )
+
+
+def _strip_blank_html_comment_lines(text: str) -> str:
+    terminal_match = None
+    for match in _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.finditer(text):
+        if match.end() == len(text):
+            terminal_match = match
+    cleaned, count = _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.subn("", text)
+    if count == 0:
+        return text
+    if terminal_match is not None:
+        return cleaned.rstrip("\r\n")
+    return cleaned
+
+
+def _reasoning_summary_delta_key(payload: Mapping[str, JsonValue]) -> tuple[str | None, int | None, int | None]:
+    item_id = payload.get("item_id")
+    output_index = payload.get("output_index")
+    summary_index = payload.get("summary_index")
+    return (
+        item_id if isinstance(item_id, str) else None,
+        output_index if isinstance(output_index, int) else None,
+        summary_index if isinstance(summary_index, int) else None,
+    )
+
+
+def _could_be_blank_html_comment_line(text: str) -> bool:
+    candidate = text.rsplit("\n", 1)[-1].lstrip(" \t")
+    if not candidate:
+        return False
+    if not candidate.startswith("<!--"):
+        return "<!--".startswith(candidate)
+    remainder = candidate[4:].lstrip()
+    if not remainder.startswith("-->"):
+        return "-->".startswith(remainder)
+    return not remainder[3:].strip(" \t\r")
+
+
+def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> bool:
+    return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
+
+
+@dataclass(slots=True)
+class _TTFTReasoningDeltaState:
+    text: str
+    visible_at: float | None = None
+
+
+def _visible_reasoning_prefix_before_blank_comment_candidate(text: str) -> str:
+    if "\n" not in text:
+        return ""
+    prefix, _candidate = text.rsplit("\n", 1)
+    return _strip_blank_html_comment_lines(prefix).strip()
+
+
+def _finalize_ttft_reasoning_deltas(
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+) -> float | None:
+    visible_at_values: list[float] = []
+    now: float | None = None
+    for pending in pending_reasoning_deltas.values():
+        if not _strip_blank_html_comment_lines(pending.text):
+            continue
+        if pending.visible_at is not None:
+            visible_at_values.append(pending.visible_at)
+            continue
+        if now is None:
+            now = time.monotonic()
+        visible_at_values.append(now)
+    pending_reasoning_deltas.clear()
+    return min(visible_at_values) if visible_at_values else None
+
+
+def _ttft_event_visible_at(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+) -> float | None:
+    now = time.monotonic()
+    pending = pending_reasoning_deltas if pending_reasoning_deltas is not None else {}
+    event_key = _reasoning_summary_delta_key(payload) if payload is not None else (None, None, None)
+    if (
+        pending
+        and not _is_reasoning_summary_interleavable_event(event_type)
+        and not (event_type in _TTFT_REASONING_EVENT_TYPES and event_key in pending)
+    ):
+        visible_at = _finalize_ttft_reasoning_deltas(pending)
+        if visible_at is not None:
+            return visible_at
+    if event_type == "response.reasoning_summary_text.delta":
+        delta = payload.get("delta") if payload is not None else None
+        if not isinstance(delta, str):
+            return None
+        previous = pending.pop(event_key, None)
+        combined = (previous.text if previous is not None else "") + delta
+        cleaned = _strip_blank_html_comment_lines(combined)
+        if cleaned != combined:
+            if not cleaned:
+                return None
+            return previous.visible_at if previous is not None and previous.visible_at is not None else now
+        if _could_be_blank_html_comment_line(combined):
+            visible_at = None if previous is None else previous.visible_at
+            if visible_at is None and _visible_reasoning_prefix_before_blank_comment_candidate(combined):
+                visible_at = now
+            pending[event_key] = _TTFTReasoningDeltaState(combined, visible_at=visible_at)
+            return None
+        if not combined:
+            return None
+        return previous.visible_at if previous is not None and previous.visible_at is not None else now
+    if event_type == "response.reasoning_summary_text.done" and event_key in pending:
+        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)})
+        return visible_at
+    if event_type in _TTFT_TOOL_DELTA_EVENT_TYPES:
+        if payload is None:
+            return None
+        has_visible_part = any(
+            isinstance(payload.get(key), str) and bool(payload[key]) for key in ("delta", "arguments")
+        )
+        return now if has_visible_part else None
+    if event_type in _TTFT_EVENT_TYPES:
+        delta = payload.get("delta") if payload is not None else None
+        return now if isinstance(delta, str) and bool(delta) else None
+    if event_type != "response.output_item.added" or not isinstance(payload, dict):
+        return None
+    item = payload.get("item")
+    return now if isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES else None
+
+
+def _is_ttft_event(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+) -> bool:
+    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas) is not None
+
+
+def _ttft_latency_ms_from_visible_at(visible_at: float | None, started_at: float) -> int | None:
+    return None if visible_at is None else max(0, int((visible_at - started_at) * 1000))
+
+
+def _ttft_event_latency_ms(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    started_at: float,
+) -> int | None:
+    return _ttft_latency_ms_from_visible_at(
+        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas), started_at
+    )
+
+
+def _finalize_ttft_latency_ms(
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    started_at: float,
+) -> int | None:
+    return _ttft_latency_ms_from_visible_at(_finalize_ttft_reasoning_deltas(pending_reasoning_deltas), started_at)
 
 
 def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:
@@ -276,6 +443,12 @@ def _supported_optional_kwargs(
     return kwargs
 
 
+_CONVERSATION_HEADERS_BY_USERAGENT_PREFIX = (
+    ("opencode", ("x-parent-session-id", "x-opencode-session", "x-session-id", "x-session-affinity")),
+    ("codex", ("thread-id",)),
+)
+
+
 def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | None, str | None]:
     raw_useragent = next((value for key, value in headers.items() if key.lower() == "user-agent"), None)
     if raw_useragent is None:
@@ -285,7 +458,25 @@ def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | Non
         return None, None
     first_token = useragent.split(maxsplit=1)[0]
     useragent_group = first_token.split("/", 1)[0].strip() or None
+    if "/" in useragent:
+        useragent_group = useragent.split("/", 1)[0]
     return useragent, useragent_group
+
+
+def _request_log_client_fields(
+    headers: Mapping[str, str],
+) -> tuple[str | None, str | None, str | None]:
+    useragent, useragent_group = _request_log_useragent_fields(headers)
+    normalized_useragent = (useragent or "").strip().casefold()
+    normalized_headers = {key.casefold(): value for key, value in headers.items()}
+    for prefix, header_names in _CONVERSATION_HEADERS_BY_USERAGENT_PREFIX:
+        if normalized_useragent.startswith(prefix):
+            for header_name in header_names:
+                value = normalized_headers.get(header_name)
+                if value and (conversation_id := value.strip()):
+                    return useragent, useragent_group, conversation_id
+            break
+    return useragent, useragent_group, None
 
 
 class _RetryableStreamError(Exception):
@@ -445,10 +636,19 @@ async def failover_after_previsible_refresh_error(
 class _TransientStreamError(Exception):
     """Transient upstream error (e.g. 500 server_error) - retry on same account first."""
 
-    def __init__(self, code: str, error: UpstreamError) -> None:
+    def __init__(
+        self,
+        code: str,
+        error: UpstreamError,
+        *,
+        preserve_on_selection_exhausted: bool = False,
+        account_health_error: bool = False,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.error = error
+        self.preserve_on_selection_exhausted = preserve_on_selection_exhausted
+        self.account_health_error = account_health_error
 
 
 class _TerminalStreamError(Exception):
@@ -534,11 +734,18 @@ class _WebSocketRequestState:
     started_at: float
     responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
+    ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] = field(
+        default_factory=dict
+    )
     latency_response_created_ms: int | None = None
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
     response_create_gate_wait_started_at: float | None = None
+    # Monotonic time immediately before the current upstream response.create
+    # send. Retries replace this value so admission wait and prior attempts do
+    # not age a fresh send into the eventless owner deadline.
+    response_create_sent_at: float | None = None
     bridge_queue_wait_started_at: float | None = None
     # Monotonic deadline of the original bridge request budget. Retry and
     # recovery paths re-prepare request states with a fresh started_at, so
@@ -608,6 +815,7 @@ class _WebSocketRequestState:
     upstream_error_code_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
+    upstream_model_output_seen: bool = False
     previous_response_not_found_rewritten: bool = False
     previous_response_owner_lookup_source: str | None = None
     previous_response_owner_lookup_outcome: str | None = None
@@ -637,9 +845,11 @@ class _WebSocketRequestState:
     upstream_proxy_fail_closed_reason: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
+    conversation_id: str | None = None
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
+    deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
@@ -685,11 +895,15 @@ class _HTTPBridgeSession:
     queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
+    # Wakes a reader that began an unbounded receive before the first request
+    # was enqueued. The reader keeps one receive task alive across wakeups.
+    upstream_reader_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
     unanchored_reservation_id: str | None = None
     admission_waiter_count: int = 0
     request_service_tier: str | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    recovery_alias_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False
@@ -857,6 +1071,59 @@ def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequest
     _clear_websocket_request_error_overrides(request_state)
 
 
+def _websocket_is_reasoning_output_item_event(event_type: str | None, payload: Mapping[str, JsonValue] | None) -> bool:
+    if event_type not in {"response.output_item.added", "response.output_item.done"} or payload is None:
+        return False
+    item = payload.get("item")
+    return isinstance(item, Mapping) and item.get("type") == "reasoning"
+
+
+def _websocket_should_defer_reasoning_prelude(
+    request_state: _WebSocketRequestState | None,
+    event_type: str | None,
+    payload: Mapping[str, JsonValue] | None,
+) -> bool:
+    if request_state is None:
+        return False
+    if request_state.downstream_visible:
+        return False
+    reasoning_output_item_event = _websocket_is_reasoning_output_item_event(event_type, payload)
+    # Once a reasoning prelude starts, keep the whole prelude buffered.  The
+    # first reasoning item marks upstream model output as seen so replay stays
+    # disabled; that marker must not make subsequent reasoning deltas visible.
+    if request_state.deferred_reasoning_downstream_texts and (
+        reasoning_output_item_event
+        or event_type
+        in {
+            "response.reasoning_text.delta",
+            "response.reasoning_text.done",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+        }
+    ):
+        return True
+    if not reasoning_output_item_event:
+        return False
+    if request_state.upstream_model_output_seen:
+        return False
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return False
+    return request_state.response_event_count <= 1
+
+
+def _pop_websocket_deferred_reasoning_downstream_texts(request_state: _WebSocketRequestState | None) -> list[str]:
+    if request_state is None or not request_state.deferred_reasoning_downstream_texts:
+        return []
+    deferred_texts = request_state.deferred_reasoning_downstream_texts
+    request_state.deferred_reasoning_downstream_texts = []
+    return deferred_texts
+
+
+def _clear_websocket_deferred_reasoning_downstream_texts(request_state: _WebSocketRequestState | None) -> None:
+    if request_state is not None:
+        request_state.deferred_reasoning_downstream_texts = []
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
@@ -881,6 +1148,8 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
     if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
         return False
     if request_state.downstream_visible:
+        return False
+    if request_state.upstream_model_output_seen:
         return False
     has_retry_safe_fresh_payload = (
         request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text is not None
@@ -1016,3 +1285,67 @@ async def _websocket_full_replay_should_wait_for_continuity(
         return False
     async with pending_lock:
         return bool(pending_requests)
+
+
+def _is_account_neutral_error_code(code: str | None) -> bool:
+    return is_local_overload_error_code(code) or code in {
+        PROCESS_NETWORK_UNAVAILABLE_CODE,
+        "proxy_unavailable",
+        "responses_compact_input_too_large",
+    }
+
+
+def _is_local_account_cap_code(code: str | None) -> bool:
+    return code in {"account_response_create_cap", "account_stream_cap"}
+
+
+def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    for status_field in ("status", "status_code"):
+        status = payload.get(status_field)
+        if isinstance(status, int) and not isinstance(status, bool):
+            return status
+    return None
+
+
+def _openai_error_envelope_from_response_failed_payload(
+    payload: dict[str, JsonValue] | None,
+) -> OpenAIErrorEnvelope:
+    default_envelope = openai_error("upstream_error", "Upstream error")
+    if not isinstance(payload, dict):
+        return default_envelope
+    response_payload = payload.get("response")
+    if not isinstance(response_payload, dict):
+        return default_envelope
+    error_payload = response_payload.get("error")
+    if not isinstance(error_payload, dict):
+        return default_envelope
+
+    message_value = error_payload.get("message")
+    if isinstance(message_value, str) and message_value.strip():
+        message = message_value.strip()
+    else:
+        message = "Upstream error"
+
+    code_value = error_payload.get("code")
+    code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else "upstream_error"
+
+    type_value = error_payload.get("type")
+    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
+
+    envelope = openai_error(code, message, error_type)
+    param_value = error_payload.get("param")
+    if isinstance(param_value, str) and param_value.strip():
+        envelope["error"]["param"] = param_value.strip()
+    error_detail = envelope["error"]
+    plan_type = error_payload.get("plan_type")
+    if plan_type is not None:
+        error_detail["plan_type"] = str(plan_type)
+    resets_at = error_payload.get("resets_at")
+    if isinstance(resets_at, int | float):
+        error_detail["resets_at"] = resets_at
+    resets_in = error_payload.get("resets_in_seconds")
+    if isinstance(resets_in, int | float):
+        error_detail["resets_in_seconds"] = resets_in
+    return envelope

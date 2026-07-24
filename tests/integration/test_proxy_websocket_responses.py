@@ -17,6 +17,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
 from app.core.utils.request_id import get_request_id
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
+from app.modules.proxy.affinity import _codex_session_selection_key
 
 pytestmark = pytest.mark.integration
 
@@ -1262,7 +1263,27 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
     assert permanent_failures == []
 
 
-def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
+@pytest.mark.parametrize(
+    ("output_event_type", "output_event_fields"),
+    [
+        ("response.output_text.delta", {"delta": "hello"}),
+        ("response.function_call_arguments.delta", {"delta": "hello"}),
+        (
+            "response.output_item.added",
+            {
+                "item": {
+                    "type": "custom_tool_call",
+                    "call_id": "call_shell_1",
+                    "name": "shell",
+                    "input": "",
+                }
+            },
+        ),
+    ],
+)
+def test_backend_responses_websocket_proxies_and_persists_conversation_id(
+    app_instance, monkeypatch, output_event_type: str, output_event_fields: dict[str, object]
+):
     upstream_messages = [
         _FakeUpstreamMessage(
             "text",
@@ -1278,9 +1299,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
             "text",
             text=json.dumps(
                 {
-                    "type": "response.output_text.delta",
+                    "type": output_event_type,
                     "response_id": "resp_ws_1",
-                    "delta": "hello",
+                    **output_event_fields,
                 },
                 separators=(",", ":"),
             ),
@@ -1399,6 +1420,8 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                 "Authorization": "Bearer external-token",
                 "chatgpt-account-id": "external-account",
                 "session_id": "thread-ws-1",
+                "user-agent": "opencode/1.0",
+                "x-opencode-session": "conv-ws-response-create",
                 "openai-beta": "responses_websockets=2026-02-06",
             },
         ) as websocket:
@@ -1408,13 +1431,13 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
             third = json.loads(websocket.receive_text())
 
     assert first["type"] == "response.created"
-    assert second["type"] == "response.output_text.delta"
+    assert second["type"] == output_event_type
     assert third["type"] == "response.completed"
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
     assert seen_headers["x-codex-turn-state"] != cast(str, seen["sticky_key"])
-    assert seen["sticky_key"] == "thread-ws-1"
+    assert seen["sticky_key"] == _codex_session_selection_key("thread-ws-1")
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
@@ -1432,7 +1455,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                     custom_tool_output,
                     {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
                 ],
-                "reasoning": {"effort": "high"},
+                "reasoning": {"effort": "high", "context": "all_turns"},
                 "client_metadata": {
                     "x-codex-turn-metadata": (
                         '{"installation_id":"account-installation","turn_id":"turn_123","sandbox":"workspace-write"}'
@@ -1457,6 +1480,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
     assert log["status"] == "success"
+    assert log["conversation_id"] == "conv-ws-response-create"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5
     latency_first_upstream_event_ms = log["latency_first_upstream_event_ms"]
@@ -1710,6 +1734,7 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
             "instructions": "",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
             "client_metadata": {marker: "true"},
+            "reasoning": {"context": "last_turn", "effort": "high"},
             "stream": True,
         }
         if previous_response_id is not None:
@@ -1747,13 +1772,18 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
     sent_payloads = [json.loads(text) for text in fake_upstream.sent_text]
     assert len(sent_payloads) == 5
     assert cast(dict[str, object], sent_payloads[0]["client_metadata"])[marker] == "true"
+    assert sent_payloads[0]["reasoning"] == {"context": "all_turns"}
     assert cast(dict[str, object], sent_payloads[1]["client_metadata"])[marker] == "true"
+    assert sent_payloads[1]["reasoning"] == {"context": "all_turns", "effort": "high"}
     assert sent_payloads[1]["previous_response_id"] == "resp_ws_lite_1"
     assert marker not in cast(dict[str, object], sent_payloads[2].get("client_metadata", {}))
+    assert sent_payloads[2]["reasoning"] == {"context": "last_turn", "effort": "high"}
     assert sent_payloads[2]["previous_response_id"] == "resp_ws_other"
     assert marker not in cast(dict[str, object], sent_payloads[3].get("client_metadata", {}))
+    assert sent_payloads[3]["reasoning"] == {"context": "last_turn", "effort": "high"}
     assert "previous_response_id" not in sent_payloads[3]
     assert cast(dict[str, object], sent_payloads[4]["client_metadata"])[marker] == "true"
+    assert sent_payloads[4]["reasoning"] == {"context": "all_turns", "effort": "high"}
     assert sent_payloads[4]["previous_response_id"] == "resp_ws_lite_2"
 
 
@@ -1942,6 +1972,7 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
     first_payloads = [json.loads(text) for text in first_upstream.sent_text]
     assert len(first_payloads) == 3
     assert cast(dict[str, object], first_payloads[2]["client_metadata"])[marker] == "true"
+    assert first_payloads[2]["reasoning"] == {"context": "all_turns"}
     assert first_payloads[2]["previous_response_id"] == "resp_ws_lite_a2"
 
     recovered_payloads = [json.loads(text) for text in recovered_upstream.sent_text]
@@ -1950,9 +1981,11 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
     assert "previous_response_id" not in replay_payload
     assert replay_payload["input"] == [user_continue, assistant_ok, user_more]
     assert marker not in cast(dict[str, object], replay_payload.get("client_metadata", {}))
+    assert "reasoning" not in replay_payload
     after_replay_payload = recovered_payloads[1]
     assert after_replay_payload["previous_response_id"] == "resp_ws_lite_replay"
     assert marker not in cast(dict[str, object], after_replay_payload.get("client_metadata", {}))
+    assert "reasoning" not in after_replay_payload
 
 
 def test_backend_responses_websocket_body_lite_fresh_replay_keeps_marker_and_continuity(
@@ -2130,9 +2163,11 @@ def test_backend_responses_websocket_body_lite_fresh_replay_keeps_marker_and_con
     assert "previous_response_id" not in replay_payload
     assert replay_payload["input"] == body_lite_full_resend
     assert cast(dict[str, object], replay_payload["client_metadata"])[marker] == "true"
+    assert replay_payload["reasoning"] == {"context": "all_turns"}
     after_replay_payload = recovered_payloads[1]
     assert after_replay_payload["previous_response_id"] == "resp_ws_lite_replay"
     assert cast(dict[str, object], after_replay_payload["client_metadata"])[marker] == "true"
+    assert after_replay_payload["reasoning"] == {"context": "all_turns"}
 
 
 def test_backend_responses_websocket_lite_visible_replay_trusts_downstream_response_id(
@@ -2953,7 +2988,10 @@ def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh
                 assert json.loads(websocket.receive_text())["type"] == "response.completed"
 
     assert turn_states[0] != turn_states[1]
-    assert [selection["key"] for selection in selections] == ["session-reconnect", "session-reconnect"]
+    assert [selection["key"] for selection in selections] == [
+        _codex_session_selection_key("session-reconnect"),
+        _codex_session_selection_key("session-reconnect"),
+    ]
     assert [selection["kind"] for selection in selections] == [
         proxy_module.StickySessionKind.CODEX_SESSION,
         proxy_module.StickySessionKind.CODEX_SESSION,
@@ -7550,11 +7588,13 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
         "stream": True,
     }
 
-    with TestClient(app_instance) as client:
+    def send_oversized_request() -> dict[str, Any]:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(request_payload))
-            error_event = json.loads(websocket.receive_text())
+            return json.loads(websocket.receive_text())
 
+    with TestClient(app_instance) as client:
+        error_event = send_oversized_request()
     assert error_event["type"] == "error"
     assert error_event["status"] == 400
     assert error_event["error"]["code"] == "payload_too_large"
@@ -7568,6 +7608,23 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
     assert meta["reason"]["error_code"] == "payload_too_large"
     assert meta["request"]["transport"] == "websocket"
     assert meta["request"]["request_text_bytes"] > 128
+
+    with TestClient(app_instance) as client:
+        duplicate_event = send_oversized_request()
+    assert duplicate_event["status"] == 400
+    assert len(list(tmp_path.glob("*.response-create.json.gz"))) == 1
+    assert len(list(tmp_path.glob("*.meta.json"))) == 1
+
+    meta_files[0].unlink()
+    with TestClient(app_instance) as client:
+        orphan_retry_event = send_oversized_request()
+    assert orphan_retry_event["status"] == 400
+    complete_pairs = [
+        dump_path
+        for dump_path in tmp_path.glob("*.response-create.json.gz")
+        if (tmp_path / f"{dump_path.name[: -len('.response-create.json.gz')]}.meta.json").exists()
+    ]
+    assert complete_pairs
 
 
 def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succeeds(

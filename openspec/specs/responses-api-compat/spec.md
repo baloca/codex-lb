@@ -593,21 +593,29 @@ The system SHALL accept `input_file` content items that reference an upload by `
 
 ### Requirement: Responses requests with input_file.file_id route to the upload's account
 
-A `/v1/responses`, `/backend-api/codex/responses`, or `/responses/compact` request that references an `{type: "input_file", file_id}` content item SHALL be routed to the upstream account that registered the file via `POST /backend-api/files`, when an in-memory pin for that `file_id` is still live. Stronger affinity signals MUST take precedence over the file_id pin: an explicit `prompt_cache_key`, a session header (`StickySessionKind.CODEX_SESSION`), a turn-state header, or a `previous_response_id` MUST keep their existing routing semantics.
+A `/v1/responses`, `/backend-api/codex/responses`, or `/responses/compact` request that references an `{type: "input_file", file_id}` content item SHALL be routed to the upstream account that registered the file via `POST /backend-api/files` when an in-memory pin for that `file_id` is still live. A live file pin is hard ownership evidence: it MUST override prompt-cache or bare process-session locality and MUST agree with independently resolved turn-state, previous-response, bridge, or other hard ownership.
 
-When multiple `file_id`s are referenced and several are pinned, the most-recently-pinned one MUST be preferred (with a deterministic lexicographic tie-break on `file_id`).
+When multiple `file_id`s are referenced, all live pins MUST resolve to the same account. If at least one ID has a live pin and another ID has no live pin, the request MUST fail with `file_owner_unavailable`; if live pins resolve to different accounts, it MUST fail with `continuity_owner_conflict`. If none of the referenced IDs has a live pin, the proxy MUST preserve compatibility with files registered directly upstream or before the current process observed the upload by forwarding the opaque IDs verbatim under ordinary unpinned routing.
 
 #### Scenario: file_id pin drives routing for an input_file response
 
 - **GIVEN** a `POST /backend-api/files` registered `file_xyz` through `account_a`
-- **WHEN** a `/v1/responses` request references `{"type": "input_file", "file_id": "file_xyz"}` and has no stronger affinity
+- **WHEN** a `/v1/responses` request references `{"type": "input_file", "file_id": "file_xyz"}`
 - **THEN** the proxy MUST route the request to `account_a`
 
-#### Scenario: prompt_cache_key overrides the file_id pin
+#### Scenario: file_id pin overrides prompt-cache locality
 
 - **GIVEN** a pinned `file_xyz -> account_a`
 - **WHEN** a `/v1/responses` request references `file_xyz` AND sets an explicit `prompt_cache_key`
-- **THEN** the proxy MUST follow the prompt-cache affinity for routing and MUST NOT use the file_id pin
+- **THEN** the proxy MUST route to `account_a` and MUST NOT send the account-scoped file to the prompt-cache account
+
+#### Scenario: opaque file_id without a live pin remains compatible
+
+- **GIVEN** a request references a `file_id` registered directly upstream or before the current process observed its upload
+- **AND** no referenced file has a live in-memory pin
+- **WHEN** the request is routed
+- **THEN** the proxy MUST forward the `file_id` verbatim under ordinary unpinned routing
+- **AND** it MUST NOT reject the request solely because local owner metadata is absent
 
 ### Requirement: Codex backend session_id preserves account affinity
 When a backend Codex Responses or compact request includes a non-empty accepted session header, the service MUST use that value as the routing affinity key for upstream account selection unless the client supplied a non-empty `x-codex-turn-state` header. If the request lacks a client-supplied `prompt_cache_key`, the service MUST derive and attach a stable `prompt_cache_key` before upstream forwarding so account affinity and upstream prompt-cache routing can coexist. Accepted session headers are `session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, and `thread-id`, in that priority order.
@@ -674,6 +682,20 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **THEN** the replacement instance MUST treat the row as restart-orphaned and may claim durable ownership locally
 - **AND** same-account takeover MUST preserve the latest persisted response anchor until a replacement response id is recorded
 - **AND** normal client retries MUST NOT be stranded waiting for the old instance lease to expire
+
+When request aliases resolve to different durable rows for the same account,
+an explicitly requested previous-response alias MUST select its row even if
+that row has since advanced to a newer response id. Without an explicitly
+resolved previous-response alias, recovery MUST select the freshest row that
+contains a persisted response anchor rather than using alias enumeration order.
+
+#### Scenario: requested durable response alias survives same-account row divergence
+
+- **GIVEN** turn-state and previous-response aliases resolve to different durable rows for the same account
+- **AND** the request names the previous-response alias whose row has since advanced to a newer response id
+- **WHEN** the service resolves durable continuity
+- **THEN** it selects the row resolved by the requested previous-response alias
+- **AND** it preserves that row's latest persisted response anchor
 
 ### Requirement: Responses account selection accounts for in-flight pressure
 
@@ -1413,6 +1435,43 @@ When an upstream Responses request fails because the work requires cybersecurity
 - **WHEN** a downstream websocket request is eligible for security-work replay
 - **THEN** codex-lb releases the request's response-create gate before scheduling the replay
 - **AND** the replay can acquire the gate instead of blocking behind the failed first attempt
+
+### Requirement: HTTP bridge security retries fail closed after an anchor or output
+
+For HTTP bridge requests, the service MUST retry security-work authorization on
+another account only before `response.created` and before any upstream model
+output. A buffered reasoning prelude counts as upstream model output even while
+it is withheld from downstream pending the security decision. A permitted
+file-free retry MUST select the replacement with cleared request and session
+affinity, but MUST validate any raw legacy owner before changing the live
+session or its durable owner generation. On success it MUST make exactly one
+durable replacement claim before swapping the session, then clear or replace
+the session affinity and local turn-state aliases. A legacy-owner conflict MUST
+leave the original session open and unchanged. File-pinned requests MUST NOT
+migrate.
+
+#### Scenario: Created HTTP bridge response is not replayed
+
+- **WHEN** an HTTP bridge request has emitted `response.created` before a
+  security-work authorization denial
+- **THEN** the service does not reconnect or resend the request on another
+  account
+- **AND** it forwards the original terminal error
+
+#### Scenario: Deferred reasoning blocks replay
+
+- **WHEN** an HTTP bridge request buffers a reasoning prelude before a
+  security-work authorization denial
+- **THEN** that prelude blocks account-switch replay and is not emitted before
+  the terminal security decision
+
+#### Scenario: Legacy owner conflict fails before replacement mutation
+
+- **GIVEN** a session-header security retry selects an authorized replacement account
+- **AND** the raw legacy affinity row belongs to a different account
+- **WHEN** the service validates the replacement
+- **THEN** it does not claim the durable session for the replacement
+- **AND** it leaves the original account, upstream, owner generation, aliases, and open session unchanged
 
 ### Requirement: Responses request compatibility controls
 
@@ -2275,6 +2334,47 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **WHEN** optional tool context fits the approximate item budget but trim-marker framing exceeds the exact wire cap
 - **THEN** backtracking removes the optional call and its matching output as one group
 - **AND** it does not re-add either counterpart while preserving every required item
+
+### Requirement: Compact trimming preserves prioritised historical side effects
+
+The service MUST retain recognised historical side-effect tool calls as bounded
+priority context when an oversized compact input is trimmed. It MUST use the
+same side-effect classifier as downstream replay
+deduplication. This includes code-mode `exec` and `collaboration` wrapper calls
+as well as their lower-level tool spellings and recognised parallel batches.
+
+For each retained historical side effect, compact trimming MUST retain its
+matching call and output together. The service MUST reserve space for that
+complete pair before selecting optional ordinary head or tail context. Required
+state anchors and the current required item remain mandatory; if they leave no
+room for a historical pair, the service MAY drop that pair together and retain a
+trim marker instead.
+
+A recognised side-effect call without a non-empty `call_id` MUST NOT be
+retained as a historical side-effect anchor, because it cannot form a verified
+call/output pair.
+
+#### Scenario: Code-mode side effect survives an oversized compact input
+
+- **WHEN** an oversized compact input contains a historical custom `exec` or
+  `collaboration` call with its matching output outside required state context
+- **THEN** the trimmed upstream input retains both the call and its output when
+  the pair fits with required state
+- **AND** optional ordinary tail context is dropped before that pair
+
+#### Scenario: Historical side-effect pair cannot fit with required state
+
+- **WHEN** required state anchors and the current required item leave no room
+  for a historical side-effect call and its matching output
+- **THEN** compact trimming drops the entire historical pair
+- **AND** it does not retain only one member of that pair
+
+#### Scenario: Side-effect call lacks a usable pair key
+
+- **WHEN** an oversized compact input contains a recognised historical
+  side-effect call without a non-empty `call_id`
+- **THEN** compact trimming does not preserve that call as a side-effect anchor
+- **AND** it does not emit an unpaired historical side-effect call upstream
 
 #### Scenario: Final compact wire expansion is rejected locally
 
