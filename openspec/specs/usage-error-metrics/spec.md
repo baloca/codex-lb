@@ -167,4 +167,3 @@ without the hourly `cancelled_count` measure.
 - **WHEN** the dashboard overview metrics are computed
 - **THEN** the metrics expose `requests=4`, `errorCount=1`, and
   `cancelledCount=2`
-

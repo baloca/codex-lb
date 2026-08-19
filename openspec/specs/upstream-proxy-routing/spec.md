@@ -158,4 +158,3 @@ The service MUST NOT replay a request when dispatch is unknown or when the reque
 - **AND** no other eligible account can be selected
 - **THEN** the client receives the original sanitized upstream-unavailable failure
 - **AND** the failure is not replaced with `no_accounts`
-

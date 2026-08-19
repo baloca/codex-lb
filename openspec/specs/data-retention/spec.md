@@ -200,4 +200,3 @@ When the effective request-log retention value is `0`, the Settings data retenti
 - **GIVEN** effective request-log retention is greater than `0`
 - **WHEN** an operator views the data retention card
 - **THEN** the disabled-state information and presets are not shown
-

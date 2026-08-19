@@ -784,4 +784,3 @@ When Prometheus support is available the service MUST expose a gauge named `code
 - **GIVEN** a fair-share denial
 - **WHEN** the warning is logged
 - **THEN** it includes the requester's `api_key_id`, key in-flight count, fair share, pool in-flight, pool capacity, and active-key count and no other key's identifier
-

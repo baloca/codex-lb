@@ -46,4 +46,3 @@ Immediately after the in-flight drain attempt returns, graceful shutdown MUST sy
 - **WHEN** graceful shutdown drains audit tasks
 - **THEN** the drain reports that task as overdue
 - **AND** shutdown is allowed to continue
-

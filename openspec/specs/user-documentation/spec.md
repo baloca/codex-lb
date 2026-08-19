@@ -93,4 +93,3 @@ differs from the code default.
 
 - **WHEN** the number of `Settings` fields exceeds the ratchet value
 - **THEN** the ratchet unit test fails, forcing a simplicity-budget discussion before the surface grows
-

@@ -743,4 +743,3 @@ an owner, or fall back to an ordinary account.
   nor required lineage
 - **THEN** selection receives the same scope, strategy, ownership, admission,
   and retry inputs as before this change
-

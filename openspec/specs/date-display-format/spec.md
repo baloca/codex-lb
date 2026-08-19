@@ -93,4 +93,3 @@ The date display format setting SHALL NOT affect Recharts x-axis tick formatting
 - **GIVEN** the date display format is `"iso8601"`
 - **WHEN** rendering a reports chart (tokens per day, cost per day, etc.)
 - **THEN** the x-axis ticks SHALL remain `MM-DD` strings (e.g., `"08-09"`)
-

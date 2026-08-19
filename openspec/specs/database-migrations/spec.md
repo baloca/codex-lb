@@ -331,4 +331,3 @@ When the application builds an Alembic `Config` for migration inspection or upgr
 - **GIVEN** a SQLite or PostgreSQL URL whose path contains no `%`
 - **WHEN** the escape and decode round-trip is applied
 - **THEN** the URL is unchanged and migration behavior is identical to before
-

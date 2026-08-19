@@ -672,4 +672,3 @@ Every stream lease acquired through account selection MUST record the requesting
 - **GIVEN** a congested pool and one key one stream below its fair share
 - **WHEN** two sticky selections for that key pass the filter-phase gate concurrently
 - **THEN** at most one acquires a lease and the other is denied at the commit re-check
-

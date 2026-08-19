@@ -3347,4 +3347,3 @@ The x-axis tick format of the Account Trend and API Trend charts SHALL be `MM-DD
 
 - **WHEN** the API Trend chart renders with timestamp data
 - **THEN** the x-axis tick labels SHALL be in `MM-DD` format (e.g., `"08-09"`)
-

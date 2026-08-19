@@ -1116,4 +1116,3 @@ The system MUST treat `ultrafast` as an access-controlled service tier and MUST 
 
 - **WHEN** no live or retained account catalog advertises `ultrafast`
 - **THEN** bootstrap model metadata does not expose or grant that tier
-

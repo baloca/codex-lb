@@ -230,4 +230,3 @@ The project CLI MUST use the pre-connection drain server with exactly one worker
 - **AND** terminates with the most recently captured signal, or SIGTERM when no signal initiated shutdown
 - **AND** does not leave cancellation-resistant cleanup registered for unbounded asyncio runner teardown
 - **AND** Helm termination grace reserves two seconds for failed preStop start plus 30 seconds after the application deadline, leaving five seconds after the cleanup bound for process exit before SIGKILL
-

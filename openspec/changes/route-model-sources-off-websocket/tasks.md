@@ -33,4 +33,3 @@
       compaction triggers and `input_file`-referencing requests so they
       dispatch to their (owner-pinned) subscription account instead of
       failing with `model_source_requires_http_transport` (Codex P2).
-

@@ -70,4 +70,3 @@ error-code behavior.
 - **WHEN** non-sticky selection acquires a lease and the selection-input cache generation changes during persistence
 - **THEN** the acquired lease is released exactly once
 - **AND** non-sticky selection reloads its inputs and retries within the existing bound
-

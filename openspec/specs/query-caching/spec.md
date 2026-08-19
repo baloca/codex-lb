@@ -849,4 +849,3 @@ single-session ownership constraint.
 - **WHEN** the proxy constructs the aggregate `/api/codex/usage` payload for a request that does not resolve to a codex-lb API key, using usage windows, credits, and additional limits
 - **THEN** each database read MUST complete before the next read starts on the shared session
 - **AND** the returned payload remains schema- and value-compatible for equivalent rows
-

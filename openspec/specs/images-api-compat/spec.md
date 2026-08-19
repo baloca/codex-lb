@@ -221,4 +221,3 @@ Byte-limit failures MUST return HTTP 413 with OpenAI error `code = payload_too_l
 - **WHEN** parsing succeeds, fails a limit, encounters malformed multipart, receives a client disconnect, or is cancelled
 - **THEN** every created multipart spool is closed
 - **AND** disconnect and cancellation are not converted to HTTP 413
-

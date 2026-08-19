@@ -173,4 +173,3 @@ chart-managed Gateway while ignoring `gatewayApi.parentRefs`.
 - **THEN** no Gateway resource renders
 - **AND** the HTTPRoute attaches to the operator-supplied
   `gatewayApi.parentRefs`
-

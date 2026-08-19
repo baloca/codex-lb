@@ -62,4 +62,3 @@ Byte-limit failures MUST return HTTP 413 with dashboard error `code = payload_to
 - **WHEN** the client disconnects or request processing is cancelled during account multipart parsing
 - **THEN** every created spool is closed
 - **AND** the disconnect or cancellation propagates without being converted to HTTP 413
-

@@ -902,4 +902,3 @@ or penalize the upstream account.
 #### Scenario: Persistence uncertainty cannot downgrade
 - **WHEN** required lineage cannot be read or established durably
 - **THEN** the request fails before ordinary account selection or dispatch
-

@@ -169,4 +169,3 @@ The client-declared multipart media type MUST NOT exempt any other method or pat
 - **WHEN** an unencoded or encoded request outside the four exact route-owned `POST` operations declares `multipart/form-data`
 - **THEN** the generic raw-body budget remains enforced
 - **AND** an oversized declared body is rejected before downstream parsing
-

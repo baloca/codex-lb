@@ -1643,4 +1643,3 @@ Auth Guardian MUST preserve stable account identities while its candidate-query 
 - **WHEN** the candidate-query session closes before per-account refresh work begins
 - **THEN** Auth Guardian refreshes the selected account without a detached-instance failure
 - **AND** the refresh worker re-reads the account in its own session before refreshing it
-

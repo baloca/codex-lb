@@ -574,4 +574,3 @@ Every shipped or documented launch path for the main application MUST delegate t
 - **WHEN** an operator follows a repository-documented command for the main application
 - **THEN** that command delegates to `app.cli`
 - **AND** direct SIGTERM reaches the pre-connection drain server
-

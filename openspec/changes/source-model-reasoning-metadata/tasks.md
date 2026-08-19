@@ -40,4 +40,3 @@
 - [ ] 3.5 The WebSocket scenario is verified by inspection only: the WebSocket
       service tree contains no model-source references, so there is no restore to
       suppress. Left unchecked rather than claimed as tested.
-

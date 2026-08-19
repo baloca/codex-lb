@@ -467,4 +467,3 @@ Before performing writes for a classified decision (label changes, legacy label 
 - **GIVEN** a run with `--tolerate-read-errors`
 - **WHEN** apply-time reclassification of one pull request fails with a GitHub read error
 - **THEN** the decision is logged and skipped without failing the run
-

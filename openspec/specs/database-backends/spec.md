@@ -374,4 +374,3 @@ Paths that do NOT match those rendered Windows forms MUST be preserved literally
 - **GIVEN** a `:memory:` SQLite URL
 - **WHEN** the path is extracted
 - **THEN** no filesystem path is returned and no file is created
-
