@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -14,8 +14,8 @@ import anyio
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
-from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
+    CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -31,6 +31,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
@@ -38,8 +39,8 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketMessage,
 )
 from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_CODE,
-    PREVIOUS_RESPONSE_STALE_MESSAGE,
+    PREVIOUS_RESPONSE_NOT_FOUND_CODE,
+    PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     openai_error,
@@ -344,6 +345,87 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+# A confirmed stale previous-response anchor can otherwise cause every client
+# reconnect to repeat the same owner lookup and doomed upstream connection.
+# Keep this local and short-lived: an owner record may still be committed by a
+# concurrent request, so discovery always invalidates the negative entry.
+_WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS = 60.0
+_WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_LIMIT = 4096
+_websocket_stale_previous_response_index: dict[tuple[str, str | None], float] = {}
+
+
+def _clear_websocket_stale_previous_response_cache() -> None:
+    """Drop process-local negative entries when a proxy service is created.
+
+    The cache intentionally is not durable: it only suppresses repeated
+    lookups during a short recovery window. Clearing it with the service
+    lifecycle prevents entries from one app/test instance from affecting a
+    later instance that happens to receive the same synthetic response id.
+    """
+    _websocket_stale_previous_response_index.clear()
+
+
+def _prune_websocket_stale_previous_response_cache(now: float | None = None) -> None:
+    current_time = time.monotonic() if now is None else now
+    for cache_key, expires_at in tuple(_websocket_stale_previous_response_index.items()):
+        if expires_at <= current_time:
+            _websocket_stale_previous_response_index.pop(cache_key, None)
+    while len(_websocket_stale_previous_response_index) > _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_LIMIT:
+        _websocket_stale_previous_response_index.pop(next(iter(_websocket_stale_previous_response_index)))
+
+
+def _remember_websocket_stale_previous_response(
+    *,
+    previous_response_id: str | None,
+    api_key_id: str | None,
+) -> None:
+    if previous_response_id is None:
+        return
+    response_id = previous_response_id.strip()
+    if not response_id:
+        return
+    now = time.monotonic()
+    _prune_websocket_stale_previous_response_cache(now)
+    cache_key = (response_id, api_key_id)
+    _websocket_stale_previous_response_index.pop(cache_key, None)
+    _websocket_stale_previous_response_index[cache_key] = now + _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS
+    _prune_websocket_stale_previous_response_cache(now)
+
+
+def _forget_websocket_stale_previous_response(
+    *,
+    previous_response_id: str | None,
+    api_key_id: str | None,
+) -> None:
+    if previous_response_id is None:
+        return
+    response_id = previous_response_id.strip()
+    if not response_id:
+        return
+    _websocket_stale_previous_response_index.pop((response_id, api_key_id), None)
+
+
+def _is_websocket_stale_previous_response(
+    *,
+    previous_response_id: str | None,
+    api_key_id: str | None,
+) -> bool:
+    if previous_response_id is None:
+        return False
+    response_id = previous_response_id.strip()
+    if not response_id:
+        return False
+    now = time.monotonic()
+    _prune_websocket_stale_previous_response_cache(now)
+    expires_at = _websocket_stale_previous_response_index.get((response_id, api_key_id))
+    if expires_at is None:
+        return False
+    if expires_at <= now:
+        _websocket_stale_previous_response_index.pop((response_id, api_key_id), None)
+        return False
+    return True
+
+
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
@@ -594,11 +676,21 @@ def _rewrite_websocket_downstream_response_id(
     if downstream_response_id is None:
         return payload
 
+    direct_response_id = payload.get("response_id")
+    rewrite_direct = isinstance(direct_response_id, str) and direct_response_id != downstream_response_id
+    response = payload.get("response")
+    nested_response_id = response.get("id") if isinstance(response, dict) else None
+    rewrite_nested = isinstance(nested_response_id, str) and nested_response_id != downstream_response_id
+    if not rewrite_direct and not rewrite_nested:
+        # Identity fast-path contract: callers skip re-serialization when the
+        # original payload object comes back, so an already-aligned frame must
+        # not be copied into an equal-but-new dict.
+        return payload
+
     rewritten = dict(payload)
-    if isinstance(rewritten.get("response_id"), str):
+    if rewrite_direct:
         rewritten["response_id"] = downstream_response_id
-    response = rewritten.get("response")
-    if isinstance(response, dict) and isinstance(response.get("id"), str):
+    if rewrite_nested and isinstance(response, dict):
         rewritten["response"] = {**response, "id": downstream_response_id}
     return rewritten
 
@@ -984,7 +1076,7 @@ def _websocket_event_error_payload(
     if event_type == "error":
         error = payload.get("error")
         if isinstance(error, dict):
-            return cast(dict[str, JsonValue], error)
+            return error
         # The ChatGPT-backed Codex websocket can emit OpenAI-style error
         # details directly on the event frame instead of under an ``error``
         # envelope. Normalize those fields into an error-detail object so the
@@ -994,7 +1086,7 @@ def _websocket_event_error_payload(
     if event_type == "response.failed":
         response = payload.get("response")
         error = response.get("error") if isinstance(response, dict) else None
-        return cast(dict[str, JsonValue], error) if isinstance(error, dict) else None
+        return error if isinstance(error, dict) else None
     return None
 
 
@@ -1026,7 +1118,10 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     upstream_control: _WebSocketUpstreamControl,
     original_text: str,
 ) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
-    error_code = _websocket_event_error_code(event_type, payload)
+    error_code = _normalize_error_code(
+        _websocket_event_error_code(event_type, payload),
+        _websocket_event_error_type(event_type, payload),
+    )
     error_param = _websocket_event_error_param(event_type, payload)
     error_message = _websocket_event_error_message(event_type, payload)
     should_rewrite = _facade()._is_previous_response_not_found_error(
@@ -1063,7 +1158,7 @@ def _websocket_continuity_error_fields(
     expose_stale_previous_response_classifier: bool,
 ) -> tuple[str, str]:
     if reason == "previous_response_not_found" and expose_stale_previous_response_classifier:
-        return PREVIOUS_RESPONSE_STALE_CODE, PREVIOUS_RESPONSE_STALE_MESSAGE
+        return PREVIOUS_RESPONSE_NOT_FOUND_CODE, PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE
     return "stream_incomplete", PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
 
 
@@ -1153,6 +1248,11 @@ def _record_websocket_stale_anchor_failure(
     request_state.failure_phase_override = "upstream"
     request_state.failure_detail_override = _websocket_stale_anchor_failure_detail(diagnostics)
     request_state.upstream_error_code_override = upstream_error_code
+    if not diagnostics.fresh_replay_available:
+        _remember_websocket_stale_previous_response(
+            previous_response_id=request_state.previous_response_id,
+            api_key_id=request_state.api_key.id if request_state.api_key is not None else None,
+        )
     _record_continuity_fail_closed(
         surface=surface,
         reason="previous_response_not_found",
@@ -1574,6 +1674,7 @@ async def _release_websocket_response_create_gate(
     request_state: _WebSocketRequestState,
     response_create_gate: asyncio.Semaphore,
 ) -> None:
+    cancellation: asyncio.CancelledError | None = None
     account_response_create_lease = request_state.account_response_create_lease
     account_response_create_release = request_state.account_response_create_release
     request_state.account_response_create_lease = None
@@ -1582,13 +1683,36 @@ async def _release_websocket_response_create_gate(
         request_state.response_create_admission.release()
         request_state.response_create_admission = None
     if account_response_create_lease is not None and account_response_create_release is not None:
-        await account_response_create_release(account_response_create_lease)
+        cancellation = await _await_cleanup_deferring_cancellation(
+            account_response_create_release(account_response_create_lease)
+        )
     request_state.awaiting_response_created = False
     request_state.response_create_gate = None
     if not request_state.response_create_gate_acquired:
+        if cancellation is not None:
+            raise cancellation
         return
     request_state.response_create_gate_acquired = False
     response_create_gate.release()
+    if cancellation is not None:
+        raise cancellation
+
+
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> asyncio.CancelledError | None:
+    """Finish response-create lease cleanup before propagating cancellation."""
+
+    task = asyncio.ensure_future(awaitable)
+    cancellation: asyncio.CancelledError | None = None
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                if task.cancelled():
+                    raise
+    return cancellation
 
 
 def _pop_terminal_websocket_request_state(
@@ -1696,14 +1820,45 @@ def _websocket_receive_timeout_for_pending_requests(
     )
 
 
+class _WebSocketJsonObject(dict[str, JsonValue]):
+    def __init__(self, pairs: list[tuple[str, JsonValue]]) -> None:
+        super().__init__(pairs)
+        self.raw_pairs = tuple(pairs)
+
+
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:
     try:
-        payload = json.loads(text)
+        payload = json.loads(text, object_pairs_hook=_WebSocketJsonObject)
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _websocket_capability_metadata_values(payload: dict[str, JsonValue]) -> tuple[JsonValue, ...] | None:
+    normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
+    payload_pairs = payload.raw_pairs if isinstance(payload, _WebSocketJsonObject) else tuple(payload.items())
+    misplaced_values = [value for key, value in payload_pairs if key.lower() == normalized_name]
+    if misplaced_values:
+        # The reserved per-frame carrier is valid only inside
+        # ``client_metadata``. Surface a deliberately ambiguous carrier set so
+        # the shared parser rejects any top-level placement before selection.
+        return (misplaced_values[0], misplaced_values[0])
+    if not isinstance(payload, _WebSocketJsonObject):
+        return None
+    metadata_objects = [value for key, value in payload.raw_pairs if key == "client_metadata"]
+    values: list[JsonValue] = []
+    for metadata in metadata_objects:
+        if not isinstance(metadata, _WebSocketJsonObject):
+            continue
+        values.extend(value for key, value in metadata.raw_pairs if key.lower() == normalized_name)
+    if len(metadata_objects) > 1 and values:
+        # A duplicate top-level metadata container can otherwise erase the
+        # sole marker through last-key-wins JSON decoding. Treat the carrier
+        # as ambiguous so routing fails before selection.
+        values.append(values[0])
+    return tuple(values)
 
 
 def _is_websocket_response_create(payload: dict[str, JsonValue]) -> bool:
@@ -1712,15 +1867,20 @@ def _is_websocket_response_create(payload: dict[str, JsonValue]) -> bool:
 
 
 def _app_error_to_websocket_event(exc: AppError) -> dict[str, JsonValue]:
+    payload = openai_error(exc.code, exc.message, error_type=getattr(exc, "error_type", "server_error"))
+    if exc.param is not None:
+        payload["error"]["param"] = exc.param
     return _wrapped_websocket_error_event(
         exc.status_code,
-        openai_error(exc.code, exc.message, error_type=getattr(exc, "error_type", "server_error")),
+        payload,
     )
 
 
 def _wrapped_websocket_error_event(
     status_code: int,
     payload: OpenAIErrorEnvelope,
+    *,
+    expose_stale_previous_response_classifier: bool = False,
 ) -> dict[str, JsonValue]:
     error = payload["error"]
     error_code = _normalize_error_code(
@@ -1735,7 +1895,13 @@ def _wrapped_websocket_error_event(
         message=error_message,
     ):
         status_code = 502
-        payload = previous_response_stream_incomplete_error()
+        # On the Codex-native route, the caller has already sanitized this to
+        # the canonical code (see _sanitize_websocket_previous_response_error);
+        # do not re-mask it back to stream_incomplete. Every other caller
+        # (public /v1, or a raw error this function is seeing for the first
+        # time) keeps the existing stream_incomplete safety net.
+        if not expose_stale_previous_response_classifier:
+            payload = previous_response_stream_incomplete_error()
     error_payload = cast(JsonValue, dict(payload["error"]))
     event: dict[str, JsonValue] = {
         "type": "error",

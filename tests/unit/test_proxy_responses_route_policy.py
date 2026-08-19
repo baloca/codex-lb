@@ -60,8 +60,9 @@ async def test_v1_responses_stateless_batch_disables_bridge_and_cache_affinity(m
     response = await proxy_api_module.v1_responses(
         _request({"x-codex-lb-route-policy": "responses_stateless_batch"}),
         _payload(stream=False),
-        _context(),
-        None,
+        _raw_trigger_validation=None,
+        context=_context(),
+        api_key=None,
     )
 
     assert response.status_code == 200
@@ -87,8 +88,9 @@ async def test_v1_responses_stateless_batch_cached_allows_prompt_cache_key(monke
     response = await proxy_api_module.v1_responses(
         _request({"x-codex-lb-route-policy": "responses_stateless_batch_cached"}),
         _payload(stream=False, prompt_cache_key="cache_123"),
-        _context(),
-        None,
+        _raw_trigger_validation=None,
+        context=_context(),
+        api_key=None,
     )
 
     forwarded_payload = captured["args"][1]
@@ -135,8 +137,9 @@ async def test_v1_responses_default_route_keeps_existing_bridge_policy(monkeypat
     response = await proxy_api_module.v1_responses(
         _request(),
         _payload(stream=False),
-        _context(),
-        None,
+        _raw_trigger_validation=None,
+        context=_context(),
+        api_key=None,
     )
 
     assert response.status_code == 200
@@ -157,8 +160,9 @@ async def test_v1_responses_rejects_unknown_route_policy(monkeypatch):
     response = await proxy_api_module.v1_responses(
         _request({"x-codex-lb-route-policy": "mystery"}),
         _payload(stream=False),
-        _context(),
-        None,
+        _raw_trigger_validation=None,
+        context=_context(),
+        api_key=None,
     )
 
     body = json.loads(bytes(response.body))
@@ -195,8 +199,9 @@ async def test_v1_responses_stateless_batch_rejects_stateful_inputs(
     response = await proxy_api_module.v1_responses(
         _request(request_headers),
         _payload(**payload_overrides),
-        _context(),
-        None,
+        _raw_trigger_validation=None,
+        context=_context(),
+        api_key=None,
     )
 
     body = json.loads(bytes(response.body))
@@ -234,8 +239,9 @@ async def test_v1_responses_stateless_batch_cached_rejects_stateful_inputs(
     response = await proxy_api_module.v1_responses(
         _request(request_headers),
         _payload(**payload_overrides),
-        _context(),
-        None,
+        _raw_trigger_validation=None,
+        context=_context(),
+        api_key=None,
     )
 
     body = json.loads(bytes(response.body))

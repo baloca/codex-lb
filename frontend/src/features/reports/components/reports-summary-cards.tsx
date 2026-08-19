@@ -33,6 +33,14 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
         cache: formatNumber(summary.totalCachedTokens),
         output: formatNumber(summary.totalOutputTokens),
       }),
+      secondarySub:
+        summary.totalRequests > 0
+          ? t("reports.summary.reasoningSub", {
+              reasoning: formatNumber(summary.totalReasoningTokens),
+              known: summary.reasoningUsageKnownRequests,
+              total: summary.totalRequests,
+            })
+          : undefined,
       comparison: buildComparison(
         summary.totalInputTokens + summary.totalOutputTokens,
         comparison.previous.totalTokens,
@@ -54,10 +62,20 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
       label: t("reports.summary.conversations"),
       value: formatNumber(summary.totalConversations),
     },
+    {
+      id: "cancelled",
+      label: t("reports.summary.cancelled"),
+      value: formatNumber(summary.totalCancelled),
+    },
+    {
+      id: "errors",
+      label: t("reports.summary.errors"),
+      value: formatNumber(summary.totalErrors),
+    },
   ];
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
       {cards.map((card) => (
         <div
           key={card.id}
@@ -78,6 +96,9 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
             ) : null}
           </div>
           {card.sub ? <div className="mt-0.5 text-xs text-muted-foreground">{card.sub}</div> : null}
+          {"secondarySub" in card && card.secondarySub ? (
+            <div className="text-xs text-muted-foreground">{card.secondarySub}</div>
+          ) : null}
         </div>
       ))}
     </div>

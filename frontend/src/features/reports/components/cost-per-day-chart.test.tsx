@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CostPerDayChart } from "./cost-per-day-chart";
@@ -41,9 +41,11 @@ describe("CostPerDayChart", () => {
             conversations: 0,
             inputTokens: 5_400_000,
             outputTokens: 59_000,
+            reasoningTokens: 0,
             cachedInputTokens: 0,
             costUsd: 3.77,
             activeAccounts: 2,
+            cancelledCount: 0,
             errorCount: 0,
           },
         ]}
@@ -65,9 +67,11 @@ describe("CostPerDayChart", () => {
             conversations: 0,
             inputTokens: 5_400_000,
             outputTokens: 59_000,
+            reasoningTokens: 0,
             cachedInputTokens: 0,
             costUsd: 3.77,
             activeAccounts: 2,
+            cancelledCount: 0,
             errorCount: 0,
           },
           {
@@ -76,9 +80,11 @@ describe("CostPerDayChart", () => {
             conversations: 0,
             inputTokens: 6_800_000,
             outputTokens: 73_000,
+            reasoningTokens: 0,
             cachedInputTokens: 0,
             costUsd: 4.54,
             activeAccounts: 2,
+            cancelledCount: 0,
             errorCount: 0,
           },
         ]}
@@ -90,5 +96,14 @@ describe("CostPerDayChart", () => {
       { date: "06-06", cost: 0 },
       { date: "06-07", cost: 4.54 },
     ]);
+  });
+
+  it("shows no-data instead of a zero-filled series when daily rows are absent", () => {
+    render(<CostPerDayChart startDate="2026-06-05" endDate="2026-06-07" data={[]} />);
+
+    expect(screen.getByText("No data")).toBeInTheDocument();
+    expect(screen.getByText("No usage recorded for the selected range.")).toBeInTheDocument();
+    expect(capturedProps).toBeNull();
+    expect(screen.queryByTestId("cost-area-chart")).not.toBeInTheDocument();
   });
 });
