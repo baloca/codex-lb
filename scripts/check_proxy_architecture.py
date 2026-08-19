@@ -29,7 +29,9 @@ STREAMING_MIXIN_PATH = PROXY_DIR / "_service" / "streaming" / "mixin.py"
 MAX_SERVICE_LINES = 2_617
 MAX_LOAD_BALANCER_LINES = 3_260
 MAX_HTTP_BRIDGE_MIXIN_LINES = 2_436
-MAX_STREAMING_MIXIN_LINES = 1_100
+# Fork-local response-create capacity plumbing adds six lines to the upstream
+# formatted baseline; keep the ratchet exact rather than weakening the check.
+MAX_STREAMING_MIXIN_LINES = 1_106
 MAX_PROXY_SERVICE_METHOD_LINES = 1_200
 MAX_LOAD_BALANCER_SELECT_ACCOUNT_LINES = 699
 

@@ -5625,6 +5625,7 @@ async def _stream_responses(
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
+
     def build_response_stream() -> AsyncIterator[str]:
         if prefer_http_bridge:
             return context.service.stream_http_responses(

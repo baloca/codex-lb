@@ -572,7 +572,9 @@ class _DummyScheduler:
 async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_resource_close(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    _reset_db_state: object,
 ) -> None:
+    del _reset_db_state
     import app.core.startup as startup_module
     import app.main as main
     from app.core import shutdown as shutdown_state
