@@ -870,6 +870,7 @@
   "modelSources.editDialog.title": "编辑 Model source",
   "modelSources.empty": "无项目",
   "modelSources.capabilities.audioTranscriptions": "Audio transcriptions",
+  "modelSources.capabilities.embeddings": "Embeddings",
   "modelSources.capabilities.chatCompletions": "Chat completions",
   "modelSources.capabilities.reasoning": "Reasoning",
   "modelSources.capabilities.responses": "Responses",
@@ -1293,6 +1294,7 @@
   "settings.telemetry.description": "分享匿名使用统计，帮助改进 codex-lb。",
   "settings.telemetry.toggleAria": "启用匿名遥测",
   "settings.telemetry.envNotice": "遥测当前由 CODEX_LB_TELEMETRY_ENABLED 环境变量控制。如需在仪表盘中管理此设置，请取消设置该变量。",
+  "settings.telemetry.optOutNotice": "从仪表盘中禁用遥测时，系统会发送一次匿名的选择退出通知，以确保汇总计数准确。",
   "settings.telemetry.collectedData.label": "收集的数据",
   "settings.telemetry.collectedData.description": "查看此实例将发送的匿名数据的完整内容。",
   "settings.telemetry.collectedData.view": "查看收集的数据",
@@ -1447,5 +1449,9 @@
   "upstreamProxy.toasts.poolUpdateFailed": "Pool 更新失败",
   "upstreamProxy.validation.hostRequired": "主机不能为空",
   "upstreamProxy.validation.nameRequired": "名称必填",
-  "upstreamProxy.validation.portInvalid": "请输入 1 到 65535 之间的端口"
+  "upstreamProxy.validation.portInvalid": "请输入 1 到 65535 之间的端口",
+  "modelSources.fields.reasoningEfforts": "支持的推理级别",
+  "modelSources.fields.reasoningEffortsDescription": "填写这个模型源接受的推理级别标识，并选择默认值。",
+  "modelSources.fields.reasoningEffortsPlaceholder": "none, low, provider-specific",
+  "modelSources.fields.defaultReasoningEffort": "默认推理级别"
 }

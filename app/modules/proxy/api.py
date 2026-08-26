@@ -26,7 +26,7 @@ from fastapi import (
     WebSocket,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.convertors import Convertor, register_url_convertor
@@ -193,6 +193,9 @@ from app.modules.model_sources.forwarding import (
 )
 from app.modules.model_sources.forwarding import (
     forward_audio_transcription as forward_source_audio_transcription,
+)
+from app.modules.model_sources.forwarding import (
+    forward_embeddings as forward_source_embeddings,
 )
 from app.modules.model_sources.forwarding import (
     forward_responses as forward_source_responses,
@@ -2183,6 +2186,7 @@ async def _await_result_deferring_cancellation(awaitable: Awaitable[_T]) -> tupl
                 if task.cancelled():
                     raise
                 cancellation_deferred = True
+    raise RuntimeError("unreachable shielded cancellation-deferral state")
 
 
 async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
@@ -2556,6 +2560,57 @@ async def v1_audio_transcriptions(
         multipart=multipart,
         context=context,
         api_key=api_key,
+    )
+
+
+class V1EmbeddingsRequest(BaseModel):
+    """OpenAI-compatible embeddings request.
+
+    Only ``model`` and ``input`` are validated; other OpenAI params
+    (``encoding_format``, ``dimensions``, ``user``, …) pass through to the
+    model source verbatim.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    input: str | list[str] | list[int] | list[list[int]]
+
+
+@v1_router.post("/embeddings")
+async def v1_embeddings(
+    request: Request,
+    payload: V1EmbeddingsRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
+    model = payload.model
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+    source = await _select_embeddings_model_source(model, api_key)
+    if source is None:
+        # Embeddings have no subscription-backed fallback: only configured
+        # model sources can serve them.
+        return _logged_error_json_response(
+            request,
+            status_code=404,
+            content=openai_error(
+                "model_not_found",
+                f"The model '{model}' does not exist or no enabled model source supports embeddings for it",
+                error_type="invalid_request_error",
+            ),
+            headers=rate_limit_headers,
+        )
+    validate_model_access(api_key, model)
+    return await _source_embeddings_response(
+        request=request,
+        model=model,
+        payload=payload,
+        source=source,
+        api_key=api_key,
+        rate_limit_headers=rate_limit_headers,
     )
 
 
@@ -3229,6 +3284,8 @@ async def _proxy_images_generation_request(
                 _output = captured.get("image_output_tokens")
                 _cached = captured.get("image_cached_input_tokens")
                 await _finalize_image_reservation(
+                    context.service,
+                    api_key,
                     reservation,
                     model=public_model,
                     input_tokens=_input if isinstance(_input, int) else None,
@@ -3282,6 +3339,8 @@ async def _proxy_images_generation_request(
     _output = captured.get("image_output_tokens")
     _cached = captured.get("image_cached_input_tokens")
     await _finalize_image_reservation(
+        context.service,
+        api_key,
         reservation,
         model=public_model,
         input_tokens=_input if isinstance(_input, int) else None,
@@ -3524,6 +3583,8 @@ async def _proxy_images_edit_request(
                 _output = captured.get("image_output_tokens")
                 _cached = captured.get("image_cached_input_tokens")
                 await _finalize_image_reservation(
+                    context.service,
+                    api_key,
                     reservation,
                     model=public_model,
                     input_tokens=_input if isinstance(_input, int) else None,
@@ -3577,6 +3638,8 @@ async def _proxy_images_edit_request(
     _output = captured.get("image_output_tokens")
     _cached = captured.get("image_cached_input_tokens")
     await _finalize_image_reservation(
+        context.service,
+        api_key,
         reservation,
         model=public_model,
         input_tokens=_input if isinstance(_input, int) else None,
@@ -3855,16 +3918,17 @@ def _canonical_model_slug(model: str) -> str:
 
 
 def _to_model_list_item(slug: str, model: UpstreamModel, *, created: int) -> ModelListItem:
+    context_window = _resolved_context_window(model)
     return ModelListItem.model_validate(
         {
             "id": slug,
             "created": created,
             "owned_by": "codex-lb",
-            "metadata": _to_model_metadata(model),
+            "metadata": _to_model_metadata(model, context_window=context_window),
             "api_types": ["chat_completions"],
-            "capabilities": _v1_model_capabilities(model),
-            "context_length": _v1_input_context_window(model),
-            "contextLength": _v1_input_context_window(model),
+            "capabilities": _v1_model_capabilities(model, context_window=context_window),
+            "context_length": context_window,
+            "contextLength": context_window,
             "max_output_tokens": _v1_max_output_tokens(model),
             "maxOutputTokens": _v1_max_output_tokens(model),
             "supports_reasoning": _v1_supports_reasoning(model),
@@ -3966,7 +4030,7 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
             extra[key] = value
 
     # If context_window is overridden, also override max_context_window to match
-    effective_cw = _effective_context_window(model)
+    effective_cw = _resolved_context_window(model)
     if effective_cw != model.context_window and "max_context_window" in extra:
         extra["max_context_window"] = effective_cw
 
@@ -3984,7 +4048,7 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         support_verbosity=model.support_verbosity,
         default_verbosity=model.default_verbosity,
         supports_parallel_tool_calls=model.supports_parallel_tool_calls,
-        context_window=_effective_context_window(model),
+        context_window=effective_cw,
         input_modalities=list(model.input_modalities),
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
@@ -3998,18 +4062,39 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
     )
 
 
-def _effective_context_window(model: UpstreamModel) -> int:
+def _resolved_context_window(model: UpstreamModel) -> int:
+    # An explicit operator context-window override is an assertion about the usable
+    # input budget, so it must also reach the generic OpenAI-compatible fields
+    # (`context_length`, `contextLength`, `capabilities.context_length`, and
+    # `metadata.input_context_window`). Generic clients read those rather than
+    # `metadata.context_window` and would otherwise cap themselves at the
+    # un-overridden upstream budget while Codex-native clients use the wider window.
+    # The override is clamped to the upstream-declared `max_context_window` so it can
+    # never advertise more input than the backend sanctions — the same clamp the Codex
+    # client applies to `model_context_window` in config.toml. The clamp only applies
+    # when upstream declares a ceiling strictly above `context_window`: bootstrap
+    # subscription models (`_bootstrap_model`) and source-catalog models
+    # (`source_models_to_upstream_models`) synthesize `max_context_window ==
+    # context_window` purely so Codex clients can parse the entry, and treating that
+    # parseability default as a real ceiling would silently disable every raise
+    # override for those models.
+    #
+    # This is the single resolution point for the reported window: the Codex-native
+    # `context_window`/`max_context_window` rewrite, `metadata.context_window`, and
+    # every input-budget field all share this one value, so an override above the
+    # backend ceiling can never split one model into two contradictory budgets.
     overrides = get_settings().model_context_window_overrides
-    return overrides.get(model.slug, model.context_window)
-
-
-def _v1_full_context_window(model: UpstreamModel) -> int:
-    overrides = get_settings().model_context_window_overrides
-    return overrides.get(model.slug, model.context_window)
-
-
-def _v1_input_context_window(model: UpstreamModel) -> int:
-    return model.context_window
+    override = overrides.get(model.slug)
+    if override is None:
+        return model.context_window
+    max_context_window = model.raw.get("max_context_window")
+    if (
+        isinstance(max_context_window, int)
+        and not isinstance(max_context_window, bool)
+        and max_context_window > model.context_window
+    ):
+        return min(override, max_context_window)
+    return override
 
 
 def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
@@ -4019,11 +4104,11 @@ def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
     return _V1_MAX_OUTPUT_TOKEN_OVERRIDES.get(model.slug)
 
 
-def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
+def _v1_model_capabilities(model: UpstreamModel, *, context_window: int) -> dict[str, JsonValue]:
     supports_streaming_raw = model.raw.get("supports_streaming")
     supports_streaming = supports_streaming_raw if isinstance(supports_streaming_raw, bool) else True
     return {
-        "context_length": _v1_input_context_window(model),
+        "context_length": context_window,
         "max_output_tokens": _v1_max_output_tokens(model),
         "supports_reasoning": _v1_supports_reasoning(model),
         "supports_images": _v1_supports_vision(model),
@@ -4071,12 +4156,12 @@ def _effective_source_codex_visibility(
     return "list"
 
 
-def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
+def _to_model_metadata(model: UpstreamModel, *, context_window: int) -> ModelMetadata:
     return ModelMetadata(
         display_name=model.display_name,
         description=model.description,
-        context_window=_v1_full_context_window(model),
-        input_context_window=_v1_input_context_window(model),
+        context_window=context_window,
+        input_context_window=context_window,
         max_output_tokens=_v1_max_output_tokens(model),
         input_modalities=list(model.input_modalities),
         supported_reasoning_levels=[
@@ -4375,6 +4460,20 @@ async def _select_responses_model_source(
     )
 
 
+async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
+    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
+    if exact_allowed_models is not None and model not in exact_allowed_models:
+        return None
+    async with get_background_session() as session:
+        source = await ModelSourcesRepository(session).find_embeddings_source_for_model(
+            model,
+            allowed_source_ids=assigned_source_ids,
+        )
+        detach_session_objects(session)
+        return source
+
+
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
@@ -4418,6 +4517,90 @@ async def _parse_transcription_multipart(
             prompt=prompt,
             ordered_text_fields=tuple(ordered_text_items(form, excluded_fields=("file",))),
         )
+
+
+async def _source_embeddings_response(
+    *,
+    request: Request,
+    model: str,
+    payload: "V1EmbeddingsRequest",
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=model,
+        request_service_tier=None,
+    )
+    outbound = payload.model_dump(exclude_none=True)
+    outbound["model"] = model
+    try:
+        result = await forward_source_embeddings(source, outbound)
+    except ModelSourceForwardingError as exc:
+        await _release_reservation(reservation)
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code=_source_error_code(exc.payload),
+            error_message=_source_error_message(exc.payload),
+            upstream_status_code=exc.upstream_status_code,
+        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+    if result.usage is None and _reservation_requires_usage(reservation):
+        await _release_reservation(reservation)
+        error = openai_error(
+            "usage_unavailable",
+            "OpenAI-compatible model source embeddings response did not include token usage for a limited API key",
+            error_type="server_error",
+        )
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_unavailable",
+            error_message="source embeddings response missing token usage",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+    settled = await _settle_source_reservation(
+        reservation,
+        source=source,
+        model=model,
+        usage=result.usage,
+    )
+    if not settled:
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_settlement_failed",
+            error_message="source usage settlement failed",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(
+            request,
+            502,
+            _source_usage_settlement_failed_error(),
+            headers=rate_limit_headers,
+        )
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="success",
+        usage=result.usage,
+        upstream_status_code=result.upstream_status_code,
+    )
+    return JSONResponse(content=result.payload, headers=dict(rate_limit_headers))
 
 
 async def _source_audio_transcription_response(
@@ -5678,14 +5861,11 @@ async def _stream_responses(
         async def _retry() -> AsyncIterator[str]:
             retry_reservation = reservation
             if prefer_http_bridge and api_key is not None and reservation is not None:
+                retry_service_tier = dict(payload.to_payload()).get("service_tier")
                 retry_reservation = await _enforce_request_limits(
                     api_key,
                     request_model=payload.model,
-                    request_service_tier=(
-                        dict(payload.to_payload()).get("service_tier")
-                        if isinstance(dict(payload.to_payload()).get("service_tier"), str)
-                        else None
-                    ),
+                    request_service_tier=(retry_service_tier if isinstance(retry_service_tier, str) else None),
                     request_usage_budget=estimate_api_key_request_usage(payload),
                 )
             retry_stream = context.service.stream_http_responses(
@@ -7713,6 +7893,8 @@ async def _release_reservation_best_effort(
 
 
 async def _finalize_image_reservation(
+    service: proxy_service_module.ProxyService,
+    api_key: ApiKeyData | None,
     reservation: ApiKeyUsageReservationData | None,
     *,
     model: str,
@@ -7720,47 +7902,18 @@ async def _finalize_image_reservation(
     output_tokens: int | None,
     cached_input_tokens: int | None = None,
 ) -> None:
-    """Finalize the API-key usage reservation for a ``/v1/images/*`` call.
-
-    The image adapter bypasses the standard stream settlement (``stream_responses``
-    is invoked with ``api_key_reservation=None``) because the ``image_generation``
-    tool path typically leaves ``response.usage`` empty; charging from
-    ``tool_usage.image_gen`` is the only source of truth. This helper
-    finalizes the reservation with the captured image tokens when present,
-    otherwise releases it. Calling this exactly once per request prevents
-    the double-billing scenario where both the standard settlement and
-    the post-hoc image record_usage path increment limits.
-
-    Persistence errors are caught and logged so a transient DB/session
-    failure during the tail accounting cannot turn a successfully
-    generated image into a user-facing 500 (non-streaming) or an
-    abrupt stream termination (streaming). This mirrors the
-    best-effort accounting policy used by
-    ``ProxyService._settle_stream_api_key_usage``.
-    """
+    """Transfer image-token settlement to tracked persistence ownership."""
     if reservation is None:
         return
-    try:
-        if not input_tokens and not output_tokens:
-            await _release_reservation(reservation)
-            return
-        async with get_background_session() as session:
-            service = ApiKeysService(ApiKeysRepository(session))
-            await service.finalize_usage_reservation(
-                reservation.reservation_id,
-                model=model,
-                input_tokens=int(input_tokens or 0),
-                output_tokens=int(output_tokens or 0),
-                cached_input_tokens=int(cached_input_tokens or 0),
-                service_tier=None,
-            )
-    except Exception:
-        logger.warning(
-            "failed to finalize image reservation reservation_id=%s model=%s",
-            reservation.reservation_id,
-            model,
-            exc_info=True,
-        )
+    await service.settle_image_api_key_usage(
+        api_key,
+        reservation,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        request_id=get_request_id() or reservation.reservation_id,
+    )
 
 
 async def _settle_source_reservation(
