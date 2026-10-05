@@ -56484,3 +56484,62 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
     send_downstream.assert_awaited_once()
     assert send_downstream.await_args is not None
     assert send_downstream.await_args.kwargs["text"] == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget_expires", [False, True])
+async def test_stateless_capacity_wait_uses_injected_clock_and_scheduler(monkeypatch, budget_expires):
+    clock = VirtualClock(monotonic_value=5_000.0)
+    scheduler = _RecordingSleepScheduler()
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()), clock=clock, scheduler=scheduler)
+    account = _make_account("acc_stateless_virtual_capacity")
+    lease = AccountLease(
+        lease_id="lease_stateless_virtual_capacity",
+        account_id=account.id,
+        kind="response_create",
+        acquired_at=clock.monotonic(),
+    )
+    selections = 0
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        nonlocal selections
+        selections += 1
+        assert kwargs["lease_kind"] == "response_create"
+        if selections == 1:
+            if budget_expires:
+                clock.advance(10_000.0)
+            return AccountSelection(account=None, error_message="At capacity", error_code="account_response_create_cap")
+        return AccountSelection(account=account, error_message=None, lease=lease)
+
+    async def stream_once(*args: object, **kwargs: object):
+        assert kwargs["selected_account_response_create_lease"] is lease
+        yield 'data: {"type":"response.completed","response":{"id":"resp_virtual_capacity"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda value, **kwargs: value))
+    monkeypatch.setattr(service, "_stream_once", stream_once)
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-6-luna", "instructions": "Reply OK.", "input": [], "stream": False}
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            account_selection_lease_kind="response_create",
+            wait_for_account_response_create_capacity=True,
+        )
+    ]
+    assert selections == (1 if budget_expires else 2)
+    assert scheduler.sleeps == ([] if budget_expires else [0.25])
+    assert ("response.failed" if budget_expires else "response.completed") in chunks[-1]

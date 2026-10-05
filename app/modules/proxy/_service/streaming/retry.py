@@ -1481,12 +1481,13 @@ class _StreamingRetryMixin:
                         _apply_error_metadata(event["response"]["error"], error)
                         yield format_sse_event(event)
                         return
+                    account = selection.account
                     if (
                         wait_for_account_response_create_capacity
                         and not selection.account
                         and _facade()._is_local_account_cap_code(selection.error_code)
                     ):
-                        remaining_budget = _facade()._remaining_budget_seconds(deadline)
+                        remaining_budget = proxy._remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
                             break
                         if not account_selection_wait_logged:
@@ -1501,7 +1502,6 @@ class _StreamingRetryMixin:
                             account_selection_wait_logged = True
                         await scheduler_for(proxy).sleep(min(0.25, max(0.01, remaining_budget)))
                         continue
-                    account = selection.account
                     current_account_lease: AccountLease | None = None
                     selected_account_response_create_lease: AccountLease | None = None
                     if selection.lease is not None:
