@@ -414,12 +414,8 @@ from app.modules.proxy.http_bridge_forwarding import (
 )
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountLease
 from app.modules.proxy.tool_call_dedupe import mark_duplicate_tool_call_downstream_event
-from app.modules.proxy.tool_call_dedupe import (
-    response_id_from_payload as tool_call_response_id_from_payload,
-)
-from app.modules.proxy.tool_call_dedupe import (
-    rewrite_parallel_tool_call_sse_line as _rewrite_tool_call_line,
-)
+from app.modules.proxy.tool_call_dedupe import response_id_from_payload as tool_call_response_id_from_payload
+from app.modules.proxy.tool_call_dedupe import rewrite_parallel_tool_call_sse_line as _rewrite_tool_call_line
 from app.modules.proxy.work_admission import AdmissionLease
 
 
@@ -506,13 +502,11 @@ class _StreamingMixin(_StreamingRetryMixin):
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
-        requested_service_tier = payload.service_tier
-        service_tier = requested_service_tier
+        requested_service_tier = service_tier = payload.service_tier
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
-        # Keep selection/failover waits out of latency and TTFT, record them as
-        # queue time, then re-anchor after this attempt's admission wait.
+        # Record selection/failover waits as queue time, then re-anchor after admission.
         attempt_started_at = start = clock.monotonic()
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status, error_code, error_message = "success", None, None

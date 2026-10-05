@@ -797,22 +797,17 @@ logger = logging.getLogger(__name__)
 _ResponsesPayloadT = TypeVar("_ResponsesPayloadT", ResponsesRequest, ResponsesCompactRequest)
 _DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
 _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
-# Keep the first HTTP bridge liveness frame behind the API layer's startup
-# error probe window. If a keepalive becomes the first yielded chunk, the HTTP
-# status is committed as 200 and startup ProxyResponseError handling is masked.
+# Delay liveness beyond the startup probe so keepalives cannot mask HTTP errors.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
 
 
 def _proxy_admission_wait_timeout_seconds() -> float:
-    # Module-level indirection so the HTTP bridge helpers and tests share one
-    # patch point for the fixed admission wait.
+    # Shared patch point for HTTP bridge helpers and tests.
     return ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
-# Maximum time (seconds) to wait for a prewarm upstream response before
-# giving up and letting the actual request proceed without prewarming.
-# A blocked prewarm holds the response_create_gate semaphore and prevents
-# the real request from being sent, leading to an indefinite :keepalive hang.
+# Bound prewarm waits: a stalled prewarm holds the response_create_gate semaphore
+# and prevents the real request from being sent.
 _PREWARM_RESPONSE_TIMEOUT_SECONDS = 2.0
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
@@ -2450,7 +2445,6 @@ def _should_failover_previsible_unary_proxy_error(exc: ProxyResponseError) -> bo
         return False
     error = _parse_openai_error(exc.payload)
     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-    # Typed transport provenance takes precedence over sanitized message text.
     return error_code == "upstream_unavailable" and (
         exc.retryable_same_contract
         if exc.failure_detail == "transport_error"

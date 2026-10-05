@@ -1499,7 +1499,7 @@ class _StreamingRetryMixin:
                                 remaining_budget,
                             )
                             account_selection_wait_logged = True
-                        await asyncio.sleep(min(0.25, max(0.01, remaining_budget)))
+                        await scheduler_for(proxy).sleep(min(0.25, max(0.01, remaining_budget)))
                         continue
                     account = selection.account
                     current_account_lease: AccountLease | None = None
@@ -2586,7 +2586,7 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     if wait_for_account_response_create_capacity:
-                                        await asyncio.sleep(0.25)
+                                        await scheduler_for(proxy).sleep(0.25)
                                         continue
                                     excluded_account_ids.add(account.id)
                                     break
@@ -3316,7 +3316,7 @@ class _StreamingRetryMixin:
                                 if wait_for_account_response_create_capacity:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
-                                    await asyncio.sleep(0.25)
+                                    await scheduler_for(proxy).sleep(0.25)
                                     continue
                                 if can_try_other_account:
                                     deferred_capacity_account = account
