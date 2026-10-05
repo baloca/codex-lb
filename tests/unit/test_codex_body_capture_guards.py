@@ -109,6 +109,20 @@ def test_output_under_a_temporary_filesystem_is_refused() -> None:
         assert_output_outside_repo(Path("/tmp/codex-body-capture"))
 
 
+def test_a_symlinked_forbidden_root_refuses_its_resolved_target(tmp_path: Path) -> None:
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir()
+    alias = tmp_path / "temporary-alias"
+    alias.symlink_to(temporary_root, target_is_directory=True)
+
+    with pytest.raises(CaptureRefusal, match="storage policy"):
+        assert_output_outside_repo(
+            temporary_root / "captures",
+            repo_root=tmp_path / "repo",
+            forbidden_roots=(str(alias),),
+        )
+
+
 def test_a_symlinked_output_directory_is_refused(tmp_path: Path) -> None:
     """Resolving first would let the symlink target escape the repository check."""
 

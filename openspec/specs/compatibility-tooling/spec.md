@@ -3,7 +3,9 @@
 ## Purpose
 
 Define the reference materials and tooling used to validate OpenAI wire compatibility in this project.
+
 ## Requirements
+
 ### Requirement: Publish compatibility support matrix
 The project MUST maintain a support matrix in `refs/openai-compat-test-plan.md` that lists supported and explicitly unsupported OpenAI-compatible features for Responses and Chat. The matrix MUST be updated whenever behavior changes.
 
@@ -732,3 +734,16 @@ successful version or timestamp.
 - **WHEN** raw HTTP/2 and controlled failure gates pass and cleanup completes
 - **THEN** the run is labelled `fast_canary`
 - **AND** it is not reported as a full TLS/composite attestation
+
+### Requirement: Isolated capture storage checks canonical root paths
+
+The isolated Codex body capture utility SHALL refuse destinations under
+configured forbidden storage roots after resolving both the destination and
+each root. An alias of a forbidden root SHALL enforce the same refusal.
+
+#### Scenario: Temporary storage root is a system alias
+
+- **GIVEN** a configured temporary root resolves through a filesystem symlink
+- **WHEN** a capture destination lies under the target of that root
+- **THEN** the utility refuses the destination with its storage-policy error
+- **AND** no capture process starts
