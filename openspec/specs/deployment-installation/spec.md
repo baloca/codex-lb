@@ -980,4 +980,3 @@ The chart README's `Upgrading` section MUST state that the shim is removed in th
 - **WHEN** the operator reads the chart README's `Upgrading` section
 - **THEN** it states that the shim is removed in this release
 - **AND** it tells the operator to upgrade to a `1.24.x` chart first, plan that step as a maintenance window, verify the cutover, and only then upgrade to this release
-

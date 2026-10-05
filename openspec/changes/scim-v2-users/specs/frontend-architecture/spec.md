@@ -128,4 +128,3 @@ The group's trigger SHALL have its own accessible name; the Advanced group's tri
 
 - **WHEN** the browser returns to `/settings?org=1#oidc`
 - **THEN** the group is expanded and the company sign-in card is scrolled into view once the group's queries have settled
-

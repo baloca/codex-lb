@@ -291,12 +291,12 @@ Single-replica deployments can use SQLite, but **multi-replica requires PostgreS
   - SQLite does not support concurrent writes from multiple pods
   - Leader election requires a shared database backend
   - Session bridge ring membership is stored in the database
-  
+
 - **Leader Election**: Enabled by default (`config.leaderElectionEnabled=true`)
   - Ensures only one pod performs background tasks (e.g., session cleanup, metrics aggregation)
   - Uses database-backed locking with a TTL (`config.leaderElectionTtlSeconds=30`)
   - If the leader crashes, another pod acquires the lock within 30 seconds
-  
+
 - **Circuit Breaker**: Enabled by default (`config.circuitBreakerEnabled=true`)
   - Protects upstream API endpoints from cascading failures
   - Opens after 5 consecutive failures; enters half-open state after 60
@@ -462,12 +462,12 @@ terminationGracePeriodSeconds (65s) bounds preStop, SIGTERM, and final cleanup
    - Measures routing dwell from Python helper start; the local start request consumes that same budget
    - Polls `/internal/drain/status`, then exits after dwell when `in_flight=0`
    - On start/status failure, exits promptly so SIGTERM becomes the fallback
-   
+
 2. **SIGTERM / remaining shared drain budget**:
    - Does not restart or extend the deadline established by preStop
    - Stops accepting new HTTP and WebSocket work
    - Lets admitted Responses turns finish terminal delivery, persistence, and settlement within the remaining budget
-   
+
 3. **terminationGracePeriodSeconds (65s default)**: Hard deadline
    - Starts before the preStop helper process and covers helper launch, preStop, SIGTERM, and final process cleanup before SIGKILL
    - Must be ≥ `config.shutdownDrainTimeoutSeconds + 32`

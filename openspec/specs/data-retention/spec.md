@@ -256,4 +256,3 @@ and mirror the check before submitting.
 - **WHEN** a client PUTs `null` for it
 - **THEN** the stored value returns to NULL and the effective value falls back
   to the environment alias, or the code default when the alias is unset
-

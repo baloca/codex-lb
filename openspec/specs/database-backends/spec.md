@@ -921,4 +921,3 @@ The startup writes that insert-if-absent into `runtime_sentinels` — the encryp
 - **WHEN** the exhaustion is reported
 - **THEN** the report names the write, the driver's `sqlite_errorname` (or its absence), and the elapsed time
 - **AND** the report contains none of the values the write was stamping
-
