@@ -53871,8 +53871,6 @@ def test_websocket_precreated_retry_error_code_replays_accepted_output_free_capa
         {"pending_tool_call_types": {"call_pending": "function_call"}},
         {"deferred_reasoning_downstream_texts": ["data: {}\n\n"]},
         {"previous_response_id": "resp_anchor"},
-        {"last_downstream_sequence_number": 0},
-        {"last_downstream_sequence_number": 1},
         {"request_text": None},
         {"response_create_sent_at": None},
     ],
@@ -54237,15 +54235,11 @@ async def test_process_upstream_websocket_text_replays_accepted_capacity_error_w
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_forwards_sequenced_accepted_capacity_error_without_replay(
+async def test_process_upstream_websocket_text_stages_sequenced_output_free_capacity_replay(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """#2127 round 4 P2-B: the direct websocket surface forwarded created(0)
-    and in_progress(1) with finite ``sequence_number`` frames. The existing
-    requirement "Direct WebSocket replay never mixes numeric response
-    sequences" (scenario "Sequenced retryable terminal event is not replayed")
-    applies to the accepted capacity terminal too: it is finalized and
-    surfaced unchanged, with no reconnect and no replay staged."""
+    """Numeric lifecycle frames allow one explicit capacity-terminal replay;
+    transport closes keep the separate fail-closed sequence guard."""
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -54273,17 +54267,18 @@ async def test_process_upstream_websocket_text_forwards_sequenced_accepted_capac
     )
 
     assert downstream_text == upstream_text
-    finalize_request_state.assert_awaited_once()
-    handle_stream_error.assert_not_awaited()
-    assert upstream_control.reconnect_requested is False
-    assert upstream_control.suppress_downstream_event is False
-    assert upstream_control.replay_request_state is None
+    finalize_request_state.assert_not_awaited()
+    handle_stream_error.assert_awaited_once()
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is pending_request
     assert pending_requests == deque()
-    assert pending_request.replay_count == 0
-    assert pending_request.replay_downstream_response_id is None
-    assert pending_request.suppress_next_created_downstream is False
-    assert pending_request.suppress_next_in_progress_downstream is False
-    assert pending_request.excluded_account_ids == set()
+    assert pending_request.replay_count == 1
+    assert pending_request.replay_downstream_response_id == "resp_accepted_visible"
+    assert pending_request.suppress_next_created_downstream is True
+    assert pending_request.suppress_next_in_progress_downstream is True
+    assert pending_request.last_downstream_sequence_number == 1
+    assert pending_request.excluded_account_ids == {account.id}
 
 
 class _YoungerTurnAdmittedDuringAffinityTouch:

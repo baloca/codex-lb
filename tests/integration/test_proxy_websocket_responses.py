@@ -13799,9 +13799,9 @@ class _TwoAccountWebSocketFailover:
             failover.connect_accounts.append(selected_account_id)
             return SimpleNamespace(id=selected_account_id), failover.upstreams_by_account[selected_account_id].popleft()
 
-        async def spy_handle_stream_error(self, account, error, code, http_status=None):
+        async def spy_handle_stream_error(self, account, error, code, http_status=None, **kwargs):
             failover.stream_errors.append((account.id, code))
-            return await real_handle_stream_error(self, account, error, code, http_status)
+            return await real_handle_stream_error(self, account, error, code, http_status, **kwargs)
 
         async def fake_write_request_log(self, **kwargs):
             del self
@@ -14059,37 +14059,96 @@ def _sequenced_accepted_capacity_failure_upstream(response_id: str) -> _Sequence
     )
 
 
-def test_backend_responses_websocket_sequenced_accepted_capacity_error_is_not_replayed(
+@pytest.mark.parametrize("hard_owner", [False, True])
+@pytest.mark.parametrize("replacement", ["success", "sequence_regression", "capacity_again"])
+def test_backend_responses_websocket_sequenced_accepted_capacity_recovery(
     app_instance,
     monkeypatch,
+    hard_owner,
+    replacement,
 ):
-    """#2127 round 4 P2-B: native Codex frames carry ``sequence_number``. Once
-    created(0) and in_progress(1) reached the client, the existing requirement
-    "Direct WebSocket replay never mixes numeric response sequences" (scenario
-    "Sequenced retryable terminal event is not replayed") governs: the
-    accepted capacity terminal is finalized and surfaced unchanged on the
-    single connect, exactly as on ``main``; the accepted-lifecycle replay does
-    not widen that contract."""
+    """A numeric lifecycle prelude can recover from an explicit no-output
+    capacity terminal without renumbering or duplicating client events."""
     first_upstream = _sequenced_accepted_capacity_failure_upstream("resp_ws_seq_accepted_failed")
-    recovered_upstream = _recovered_upstream("resp_ws_seq_accepted_unused")
+    recovery_id = "resp_ws_seq_recovered"
+    recovery_events = [
+        _sequenced_ws_event({"type": "response.created", "response": {"id": recovery_id, "status": "in_progress"}}, 0),
+        _sequenced_ws_event(
+            {"type": "response.in_progress", "response": {"id": recovery_id, "status": "in_progress"}}, 1
+        ),
+    ]
+    if replacement == "capacity_again":
+        recovery_events.append(
+            _sequenced_ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_at_capacity",
+                        "message": "Selected model is at capacity. Please try a different model.",
+                    },
+                },
+                2,
+            )
+        )
+    else:
+        recovery_events.extend(
+            [
+                _sequenced_ws_event(
+                    {"type": "response.output_text.delta", "response_id": recovery_id, "delta": "OK"},
+                    1 if replacement == "sequence_regression" else 2,
+                ),
+                _sequenced_ws_event(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": recovery_id,
+                            "status": "completed",
+                            "output": [],
+                            "usage": {"input_tokens": 1, "output_tokens": 1},
+                        },
+                    },
+                    3,
+                ),
+            ]
+        )
+    recovered_upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[recovery_events])
     failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    if hard_owner:
+        failover.bind_bare_session_hard_owner(recovered_upstream)
+        # Match a deployment with only the established owner available.
+        del failover.upstreams_by_account[failover.SECOND_ACCOUNT_ID]
     failover.install(monkeypatch)
+    events, disconnect = failover.run(
+        app_instance,
+        headers=failover.BARE_SESSION_HEADERS if hard_owner else None,
+    )
 
-    events, disconnect = failover.run(app_instance)
-
-    assert disconnect is None, f"unexpected disconnect code={disconnect.code}"
-    assert [(event["type"], event["sequence_number"]) for event in events] == [
+    assert [(event["type"], event["sequence_number"]) for event in events[:2]] == [
         ("response.created", 0),
         ("response.in_progress", 1),
-        ("error", 2),
     ]
+    assert [event["type"] for event in events].count("response.created") == 1
+    assert [event["type"] for event in events].count("response.in_progress") == 1
     assert events[0]["response"]["id"] == "resp_ws_seq_accepted_failed"
-    assert events[-1]["error"]["code"] == "server_is_overloaded"
-    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID]
-    assert failover.excluded_at_connect == [set()]
-    assert not failover.refused_connects
-    assert len(first_upstream.sent_text) == 1
-    assert recovered_upstream.sent_text == []
+    if replacement == "success":
+        _assert_ws_single_response_lifecycle_completed(events, disconnect)
+        assert [event["sequence_number"] for event in events] == [0, 1, 2, 3]
+        assert events[2]["response_id"] == "resp_ws_seq_accepted_failed"
+    elif replacement == "sequence_regression":
+        assert len(events) == 2
+        assert disconnect is not None and disconnect.code == 1011
+    else:
+        assert disconnect is None
+        assert events[-1]["type"] == "error"
+        assert events[-1]["sequence_number"] == 2
+    if hard_owner:
+        failover.assert_re_sent_to_bare_session_hard_owner()
+    else:
+        failover.assert_retried_on_another_account()
+    assert len(first_upstream.sent_text) == len(recovered_upstream.sent_text) == 1
+    assert json.loads(recovered_upstream.sent_text[0])["model"] == json.loads(first_upstream.sent_text[0])["model"]
+    assert len(failover.request_logs) == 1
+    assert failover.request_logs[0]["status"] == ("success" if replacement == "success" else "error")
 
 
 def test_backend_responses_websocket_sequenced_accepted_abrupt_close_fails_closed_without_replay(
