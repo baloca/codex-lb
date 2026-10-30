@@ -10567,6 +10567,68 @@ async def test_stream_responses_websocket_slims_images_nested_in_tool_output_and
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_websocket_slims_current_turn_images_over_budget_and_succeeds(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        log_upstream_request_payload = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64, raising=False)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 2048, raising=False)
+
+    messages = [
+        SimpleNamespace(
+            type=proxy_module.aiohttp.WSMsgType.TEXT,
+            data='{"type":"response.created","response":{"id":"resp_ws_turn_img","service_tier":"auto"}}',
+        ),
+        SimpleNamespace(
+            type=proxy_module.aiohttp.WSMsgType.TEXT,
+            data='{"type":"response.completed","response":{"id":"resp_ws_turn_img","service_tier":"default"}}',
+        ),
+    ]
+    websocket = _WsResponse(messages)
+    session = _WsSession(websocket)
+    image_part = {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1200)}
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]},
+                {"type": "custom_tool_call_output", "call_id": "call_1", "output": [dict(image_part)]},
+                {"type": "custom_tool_call_output", "call_id": "call_2", "output": [dict(image_part)]},
+            ],
+        }
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override="websocket",
+        )
+    ]
+
+    assert len(events) == 2
+    request_input = cast(list[dict[str, object]], websocket.sent_json[0]["input"])
+    assert request_input[1]["output"] == [
+        {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+    ]
+    assert request_input[2]["output"] == [image_part]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_websocket_forces_response_create_event_type(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -28343,6 +28405,53 @@ def test_slim_response_create_rewrites_images_nested_in_tool_output_parts():
         {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
     ]
     assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]}
+
+
+def _current_turn_screenshot_payload() -> dict[str, JsonValue]:
+    def screenshot(call_id: str, fill: str) -> dict[str, JsonValue]:
+        return {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": [
+                {"type": "input_text", "text": f"screenshot {call_id}"},
+                {"type": "input_image", "image_url": "data:image/png;base64," + (fill * 1500)},
+            ],
+        }
+
+    return {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "check the page"}]},
+            screenshot("call_1", "A"),
+            screenshot("call_2", "B"),
+            screenshot("call_3", "C"),
+        ],
+    }
+
+
+def test_slim_response_create_drops_oldest_current_turn_images_until_within_budget():
+    payload = _current_turn_screenshot_payload()
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=2500)
+    slimmed_input = cast(list[dict[str, JsonValue]], slimmed_payload["input"])
+    notice = {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+
+    assert summary == {"historical_tool_outputs_slimmed": 0, "historical_images_slimmed": 0, "recent_images_slimmed": 2}
+    assert len(json.dumps(slimmed_payload, separators=(",", ":"))) <= 2500
+    assert slimmed_input[0] == payload["input"][0]
+    assert slimmed_input[1]["output"] == [{"type": "input_text", "text": "screenshot call_1"}, notice]
+    assert slimmed_input[2]["output"] == [{"type": "input_text", "text": "screenshot call_2"}, notice]
+    assert slimmed_input[3] == payload["input"][3]
+
+
+def test_slim_response_create_keeps_current_turn_images_when_within_budget():
+    payload = _current_turn_screenshot_payload()
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=1_000_000)
+
+    assert summary is None
+    assert slimmed_payload is payload
 
 
 def test_slim_response_create_slims_oversized_custom_and_apply_patch_string_outputs():

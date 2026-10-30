@@ -33,6 +33,7 @@ from app.core.clients.proxy import (
     _response_create_too_large_error_envelope,
     _should_slim_historical_tool_output,
     _slim_historical_response_content,
+    _slim_recent_inline_images_to_budget,
     _ws_transport_payload_budget_bytes,
     apply_codex_installation_metadata,
 )
@@ -408,13 +409,17 @@ def _slim_response_create_payload_for_upstream(
 
     candidate_payload = dict(payload)
     candidate_payload["input"] = slimmed_historical + recent
+    candidate_payload, recent_images_slimmed = _slim_recent_inline_images_to_budget(
+        candidate_payload, max_bytes=max_bytes
+    )
 
-    if tool_outputs_slimmed == 0 and images_slimmed == 0:
+    if tool_outputs_slimmed == 0 and images_slimmed == 0 and recent_images_slimmed == 0:
         return payload, None
 
     return candidate_payload, {
         "historical_tool_outputs_slimmed": tool_outputs_slimmed,
         "historical_images_slimmed": images_slimmed,
+        "recent_images_slimmed": recent_images_slimmed,
     }
 
 

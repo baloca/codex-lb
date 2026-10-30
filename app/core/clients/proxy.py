@@ -3187,7 +3187,6 @@ def _slim_response_create_payload_for_upstream(
     max_bytes: int,
     protected_agent_control_output_occurrences: Mapping[tuple[str, str], tuple[bool, ...]] | None = None,
 ) -> tuple[JsonObject, dict[str, int] | None]:
-    del max_bytes
     input_value = payload.get("input")
     if not isinstance(input_value, list) or not input_value:
         return payload, None
@@ -3214,14 +3213,19 @@ def _slim_response_create_payload_for_upstream(
         images_slimmed += item_images_slimmed
         slimmed_historical.append(slimmed_item)
 
-    if tool_outputs_slimmed == 0 and images_slimmed == 0:
-        return payload, None
-
     candidate_payload = dict(payload)
     candidate_payload["input"] = slimmed_historical + recent
+    candidate_payload, recent_images_slimmed = _slim_recent_inline_images_to_budget(
+        candidate_payload, max_bytes=max_bytes
+    )
+
+    if tool_outputs_slimmed == 0 and images_slimmed == 0 and recent_images_slimmed == 0:
+        return payload, None
+
     return candidate_payload, {
         "historical_tool_outputs_slimmed": tool_outputs_slimmed,
         "historical_images_slimmed": images_slimmed,
+        "recent_images_slimmed": recent_images_slimmed,
     }
 
 
@@ -3363,6 +3367,50 @@ def _slim_historical_response_content_part(part: JsonValue) -> tuple[JsonValue, 
             return _response_create_inline_image_notice_part(), 1
 
     return part_mapping, 0
+
+
+def _slim_recent_inline_images_to_budget(payload: JsonObject, *, max_bytes: int) -> tuple[JsonObject, int]:
+    """Last resort once history is slimmed: drop current-turn inline images, oldest first, until it fits."""
+    input_value = payload.get("input")
+    if not isinstance(input_value, list) or not input_value:
+        return payload, 0
+    payload_size = _response_create_json_size(payload)
+    if payload_size <= max_bytes:
+        return payload, 0
+
+    input_items = list(input_value)
+    images_slimmed = 0
+    for index in range(_response_create_recent_suffix_start(input_items), len(input_items)):
+        if payload_size <= max_bytes:
+            break
+        item = input_items[index]
+        if not is_json_mapping(item):
+            continue
+        slimmed_item = dict(item)
+        item_images_slimmed = 0
+        for key in ("output", "content"):
+            slimmed_value, value_images_slimmed = _slim_historical_response_content(slimmed_item.get(key))
+            if value_images_slimmed > 0:
+                slimmed_item[key] = slimmed_value
+                item_images_slimmed += value_images_slimmed
+        if slimmed_item.get("type") == "input_image" and _is_inline_image_reference(slimmed_item.get("image_url")):
+            slimmed_item = _response_create_inline_image_notice_item()
+            item_images_slimmed += 1
+        if item_images_slimmed == 0:
+            continue
+        payload_size += _response_create_json_size(slimmed_item) - _response_create_json_size(item)
+        input_items[index] = slimmed_item
+        images_slimmed += item_images_slimmed
+
+    if images_slimmed == 0:
+        return payload, 0
+    candidate_payload = dict(payload)
+    candidate_payload["input"] = input_items
+    return candidate_payload, images_slimmed
+
+
+def _response_create_json_size(value: JsonValue) -> int:
+    return len(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
 
 
 def _response_create_inline_image_notice_part() -> JsonObject:
