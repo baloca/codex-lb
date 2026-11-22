@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -1214,9 +1216,12 @@ When an HTTP bridge session receives an anonymous upstream `previous_response_no
 ### Requirement: WebSocket full-resend previous-response misses retry without stale anchor
 When a direct WebSocket `response.create` request includes both `previous_response_id` and a self-contained full resend payload, the service MUST retain a safe replay body without `previous_response_id`. If upstream rejects the anchor with `previous_response_not_found` before `response.created`, the service MUST reconnect and replay the retained full payload as a fresh turn instead of forwarding the raw upstream invalid-request error. A payload that only carries incremental tool outputs for tool calls that are not also present in the same request is not self-contained and MUST NOT be replayed as a fresh turn without `previous_response_id`.
 
+A client-supplied `previous_response_id` payload counts as a full resend only when the anchor is the response this downstream connection last completed, that response's request input covered its whole context (it had no anchor, a proxy-injected anchor, or was itself a proven full resend), and the payload's input restates that stored input prefix. A completion recorded from a client-anchored delta stores only the delta, so it never proves a later anchorless replay. Clients such as Codex send `previous_response_id` with only the incremental input, so for any other anchor (one this connection never completed, such as an interrupted response, an accepted prewarm, or a response from an earlier connection) the service cannot tell a delta from a full history. It MUST NOT retain or send an anchorless replay body for such a payload, and a pre-output `previous_response_not_found` MUST reach the client so that it can resend its complete history.
+
 #### Scenario: full-resend WebSocket follow-up loses just-completed anchor
 - **WHEN** a WebSocket `/v1/responses` or `/backend-api/codex/responses` follow-up has `previous_response_id`
-- **AND** the request payload also carries enough input to be treated as a full resend
+- **AND** that anchor is the response this connection last completed
+- **AND** the request payload restates that response's stored input prefix, so it carries enough input to be treated as a full resend
 - **AND** upstream emits `previous_response_not_found` before assigning a response id
 - **THEN** the service reconnects the upstream WebSocket
 - **AND** it replays the same request without `previous_response_id`
@@ -1228,6 +1233,20 @@ When a direct WebSocket `response.create` request includes both `previous_respon
 - **AND** upstream emits `previous_response_not_found` before assigning a response id
 - **THEN** the service MUST NOT replay that payload as a fresh turn without `previous_response_id`
 - **AND** the downstream client receives a retryable continuity failure rather than a fabricated fresh turn
+
+#### Scenario: delta after an anchor the connection never completed is not replayed as a fresh turn
+- **WHEN** a WebSocket `/v1/responses` or `/backend-api/codex/responses` follow-up has `previous_response_id`
+- **AND** that anchor is not the response this connection last completed (for example a response that ended `response.incomplete`, an accepted `generate=false` prewarm, or a response from another connection)
+- **AND** the request payload is self-contained but carries only the turn's new items, such as a user message
+- **THEN** the service MUST NOT retain an anchorless replay body for that request
+- **AND** if upstream emits `previous_response_not_found` before assigning a response id, the downstream client receives `previous_response_not_found` rather than a fresh turn built from the new items alone
+
+#### Scenario: restated delta of a client-anchored completion is not replayed as a fresh turn
+- **WHEN** a WebSocket `/v1/responses` or `/backend-api/codex/responses` follow-up has `previous_response_id`
+- **AND** that anchor is the response this connection last completed, but that response's request was itself anchored by the client and carried only a delta
+- **AND** the follow-up input restates that delta and adds new items
+- **THEN** the service MUST NOT retain an anchorless replay body for that request
+- **AND** if upstream emits `previous_response_not_found` before assigning a response id, the downstream client receives `previous_response_not_found` rather than a fresh turn that omits the earlier context
 
 ### Requirement: Parameterless invalid previous-response errors use continuity recovery
 
@@ -4479,7 +4498,6 @@ emit no synthetic terminal frame, and close downstream with code 1011.
 - **GIVEN** native session affinity resolves to the only available owner account
 - **WHEN** a sequenced output-free capacity terminal is retried
 - **THEN** the proxy MUST reconnect to the eligible owner without excluding it
-
 
 ### Requirement: Downstream websocket ingress accepts large response.create messages
 The server MUST accept client-to-proxy websocket messages on the Responses websocket routes (`/backend-api/codex/responses`, `/v1/responses`) up to a configurable ingress budget before closing the connection at the protocol layer. The default budget MUST be 128 MiB, matching the HTTP responses-path decompressed body cap. The budget MUST be configurable via the `--ws-max-size` CLI flag and the `UVICORN_WS_MAX_SIZE` environment variable, with the CLI flag taking precedence. The server MUST continue to negotiate `permessage-deflate` on the client-facing websocket, and the ingress budget MUST apply to the decompressed message size.
@@ -10909,3 +10927,36 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
+
+### Requirement: SSE keepalives preserve upstream timeout failures
+The SSE keepalive injector MUST emit heartbeats only when its own idle interval expires. A TimeoutError raised by the upstream iterator MUST propagate and MUST NOT produce an unbounded heartbeat stream. Source cleanup and downstream cancellation MUST remain effective.
+
+#### Scenario: Source times out after output
+- **GIVEN** an upstream stream has delivered a frame
+- **WHEN** its next chunk raises TimeoutError
+- **THEN** the error propagates through the downstream streaming response
+- **AND** the source closes without emitting substitute keepalives
+
+#### Scenario: Source times out between heartbeat reads
+- **GIVEN** the injector emitted an idle heartbeat while the next chunk was pending
+- **WHEN** that pending chunk fails with TimeoutError before the consumer resumes
+- **THEN** the next read propagates the upstream error and closes the source
+
+#### Scenario: Source failure collides with idle expiry
+- **GIVEN** the idle timer cancels the waiting read
+- **AND** the pending source read fails before that waiting read resumes
+- **WHEN** the consumer's same read resumes
+- **THEN** it raises the original source exception without a heartbeat or heartbeat callback
+- **AND** the wrapper and source close without another consumer read
+
+#### Scenario: Source chunk or exhaustion collides with idle expiry
+- **GIVEN** the idle timer cancels the waiting read
+- **AND** the pending source read settles before that waiting read resumes
+- **WHEN** the source settles with a normal chunk
+- **THEN** the same consumer read yields that chunk without a heartbeat or heartbeat callback
+- **WHEN** the source instead settles with StopAsyncIteration
+- **THEN** the same consumer read ends the stream without a heartbeat or heartbeat callback
+
+#### Scenario: Healthy source remains idle
+- **WHEN** the injector's idle interval expires while the source is still pending
+- **THEN** the injector emits a heartbeat and preserves the pending source read
